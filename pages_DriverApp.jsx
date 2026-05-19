@@ -57,9 +57,25 @@ const mkDivIcon = (bg, border, size = 18) => new L.DivIcon({
   html: `<div style="width:${size}px;height:${size}px;background:${bg};border:3px solid ${border};border-radius:50%;box-shadow:0 0 14px ${border}88;"></div>`,
   iconSize: [size, size], iconAnchor: [size / 2, size / 2],
 })
-const DRIVER_ICON = mkDivIcon('#a78bfa', '#7c3aed')
-const DEST_ICON   = mkDivIcon('#22d3ee', '#0891b2', 16)
-const WAYPOINT_ICON = mkDivIcon('#f59e0b', '#d97706', 12)
+// 🚛 Truck icon (driver position)
+const DRIVER_ICON = new L.DivIcon({
+  className: '',
+  html: `<div style="font-size:22px;line-height:1;filter:drop-shadow(0 0 6px #7c3aed88);">🚛</div>`,
+  iconSize: [28, 28], iconAnchor: [14, 14],
+})
+// Destination marker
+const DEST_ICON = new L.DivIcon({
+  className: '',
+  html: `<div style="width:18px;height:18px;background:#22d3ee;border:3px solid #0891b2;border-radius:50%;box-shadow:0 0 14px #0891b288;"></div>`,
+  iconSize: [18, 18], iconAnchor: [9, 9],
+})
+// Waypoint / stop marker (numbered)
+const makeStopIcon = (num) => new L.DivIcon({
+  className: '',
+  html: `<div style="width:22px;height:22px;background:#f59e0b;border:2px solid #d97706;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#000;box-shadow:0 0 10px #f59e0b66;">${num}</div>`,
+  iconSize: [22, 22], iconAnchor: [11, 11],
+})
+const WAYPOINT_ICON = makeStopIcon('●')
 
 // ── Constants ─────────────────────────────────────────────────
 const OSRM_URL       = 'https://router.project-osrm.org/route/v1/driving'
@@ -536,6 +552,63 @@ function DriverAppMain({ profile, onLogout }) {
   // ── Jobs state ───────────────────────────────────────────────
   const [jobs,       setJobs]      = useState(() => loadJobs(profile.id))
   const [activeJob,  setActiveJob] = useState(null)
+  const [jobStops,   setJobStops]  = useState([])    // [{lat,lng,name,idx}] all geocoded stops
+  const [stopRoutes, setStopRoutes] = useState([])   // [[lat,lng]...] polylines per stop segment
+
+  // ── Fullscreen state ─────────────────────────────────────────
+  const [isFullscreen, setIsFullscreen] = useState(false)
+  const appRef = useRef(null)
+
+  const enterFullscreen = () => {
+    const el = appRef.current || document.documentElement
+    try {
+      if (el.requestFullscreen) el.requestFullscreen()
+      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen()
+      setIsFullscreen(true)
+    } catch {}
+  }
+  const exitFullscreen = () => {
+    try {
+      if (document.exitFullscreen) document.exitFullscreen()
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen()
+      setIsFullscreen(false)
+    } catch {}
+  }
+
+  useEffect(() => {
+    const handler = () => {
+      setIsFullscreen(!!(document.fullscreenElement || document.webkitFullscreenElement))
+    }
+    document.addEventListener('fullscreenchange', handler)
+    document.addEventListener('webkitfullscreenchange', handler)
+    return () => {
+      document.removeEventListener('fullscreenchange', handler)
+      document.removeEventListener('webkitfullscreenchange', handler)
+    }
+  }, [])
+
+  // ── Fleet link code state ───────────────────────────────────
+  const [showFleetConnect, setShowFleetConnect] = useState(false)
+  const [fleetLinkCode,    setFleetLinkCode]    = useState('')
+  const [fleetLinkError,   setFleetLinkError]   = useState('')
+  const [fleetLinkSuccess, setFleetLinkSuccess] = useState(false)
+
+  const submitFleetCode = useCallback(() => {
+    setFleetLinkError('')
+    const result = validatePairingCode(fleetLinkCode.trim())
+    if (!result.ok) {
+      setFleetLinkError(result.error)
+      return
+    }
+    setFleetLinkSuccess(true)
+    setFleetLinkCode('')
+    // Reload jobs after linking
+    setTimeout(() => {
+      setJobs(loadJobs(profile.id))
+      setShowFleetConnect(false)
+      setFleetLinkSuccess(false)
+    }, 2000)
+  }, [fleetLinkCode, profile.id])
 
   // ── GPS watch ────────────────────────────────────────────────
   useEffect(() => {
@@ -796,6 +869,7 @@ function DriverAppMain({ profile, onLogout }) {
 
   const clearRoute = () => {
     setDest(null); setDestName(''); setRoute(null); setRouteInfo(null); setRouteSteps([]); setStepIdx(0)
+    setJobStops([]); setStopRoutes([])
   }
 
   // ── RouteMind AI tip on new destination ──────────────────────
@@ -890,39 +964,118 @@ function DriverAppMain({ profile, onLogout }) {
   }, [chatInput, profile])
 
   // ── Job: navigate ────────────────────────────────────────────
+  // Geocode a single address string → [lat, lng] or null
+  const geocodeAddr = useCallback(async (addr) => {
+    try {
+      const results = await mapService.geocode(addr)
+      if (results?.length) return [results[0].lat, results[0].lng]
+    } catch {}
+    try {
+      const r = await fetch(`${NOM_URL}?q=${encodeURIComponent(addr)}&format=json&limit=1`, {
+        headers: { 'Accept-Language': 'en', 'User-Agent': 'ApexAI-DriverApp/1.0' }
+      })
+      const data = await r.json()
+      if (data[0]) return [parseFloat(data[0].lat), parseFloat(data[0].lon)]
+    } catch {}
+    return null
+  }, [])
+
   const navigateToJob = useCallback(async (job) => {
     setActiveJob(job)
+    setJobStops([])
+    setStopRoutes([])
     updateJobStatus(job.id, 'in_progress', profile.id)
     setTab('map')
 
-    const addr = job.destination || job.dropoff_address || job.address || ''
-    if (!addr) return
+    // Collect all stop addresses from the job object
+    // Supports: stops[], waypoints[], pickup_address+dropoff_address, or single destination
+    const rawStops = []
+    if (Array.isArray(job.stops) && job.stops.length > 0) {
+      job.stops.forEach(s => {
+        const addr = typeof s === 'string' ? s : (s.address || s.name || '')
+        if (addr.trim()) rawStops.push({ addr, name: typeof s === 'object' ? (s.name || addr) : addr })
+      })
+    } else if (Array.isArray(job.waypoints) && job.waypoints.length > 0) {
+      job.waypoints.forEach((w, i) => {
+        const addr = typeof w === 'string' ? w : (w.address || w.name || '')
+        if (addr.trim()) rawStops.push({ addr, name: typeof w === 'object' ? (w.name || addr) : addr })
+      })
+    } else {
+      const pickup  = job.pickup_address  || job.pickup  || ''
+      const dropoff = job.dropoff_address || job.destination || job.address || ''
+      if (pickup.trim())  rawStops.push({ addr: pickup,  name: 'Pickup'  })
+      if (dropoff.trim()) rawStops.push({ addr: dropoff, name: 'Dropoff' })
+    }
 
-    // Try mapService geocode first (GH or Google), then Nominatim
-    let destCoords = null
-    try {
-      const results = await mapService.geocode(addr)
-      if (results?.length) {
-        destCoords = [results[0].lat, results[0].lng]
-      }
-    } catch (e) { console.warn('[Job geocode] mapService failed:', e.message) }
+    if (rawStops.length === 0) return
 
-    if (!destCoords) {
+    // Geocode all stops
+    const geocoded = []
+    for (let i = 0; i < rawStops.length; i++) {
+      const coords = await geocodeAddr(rawStops[i].addr)
+      if (coords) geocoded.push({ lat: coords[0], lng: coords[1], name: rawStops[i].name, idx: i + 1 })
+    }
+
+    if (geocoded.length === 0) return
+
+    setJobStops(geocoded)
+
+    // Route: pos → stop1 → stop2 → … → final stop (chained segments)
+    const waypoints = geocoded.map(g => [g.lat, g.lng])
+    const final = waypoints[waypoints.length - 1]
+
+    // Set primary destination = last stop
+    setDest(final)
+    setDestName(geocoded[geocoded.length - 1]?.name || rawStops[rawStops.length - 1]?.addr || '')
+
+    if (!pos) return
+
+    // Fetch each segment and store polylines
+    if (waypoints.length === 1) {
+      // Single stop — just route normally
+      fetchRoute(pos, waypoints[0])
+    } else {
+      // Multi-stop: chain segments pos→wp0, wp0→wp1, etc.
+      const allPoints = [pos, ...waypoints]
+      const segments = []
+      const allPolylines = []
       try {
-        const r = await fetch(`${NOM_URL}?q=${encodeURIComponent(addr)}&format=json&limit=1`, {
-          headers: { 'Accept-Language': 'en', 'User-Agent': 'ApexAI-DriverApp/1.0' }
-        })
-        const [result] = await r.json()
-        if (result) destCoords = [parseFloat(result.lat), parseFloat(result.lon)]
-      } catch {}
+        for (let i = 0; i < allPoints.length - 1; i++) {
+          const from = allPoints[i]
+          const to   = allPoints[i + 1]
+          const coords = `${from[1]},${from[0]};${to[1]},${to[0]}`
+          const r = await fetch(`${OSRM_URL}/${coords}?overview=full&geometries=geojson&steps=true`)
+          const data = await r.json()
+          if (data.routes?.[0]) {
+            const seg = data.routes[0].geometry.coordinates.map(([lng, lat]) => [lat, lng])
+            allPolylines.push(seg)
+          }
+        }
+        setStopRoutes(allPolylines)
+        // Full flattened polyline for main route display
+        const flat = allPolylines.flat()
+        if (flat.length) setRoute(flat)
+        // Steps from first segment
+        const firstR = await fetch(`${OSRM_URL}/${pos[1]},${pos[0]};${waypoints[0][1]},${waypoints[0][0]}?overview=full&geometries=geojson&steps=true`)
+        const firstD = await firstR.json()
+        if (firstD.routes?.[0]) {
+          const steps = firstD.routes[0].legs?.[0]?.steps || []
+          setRouteSteps(steps)
+          setStepIdx(0)
+          const totDist = allPolylines.reduce((a, seg) => {
+            // rough approx from first+last
+            return a
+          }, firstD.routes[0].distance)
+          setRouteInfo({ distance: firstD.routes[0].distance, duration: firstD.routes[0].duration })
+          setRouteProvider('osrm')
+        }
+      } catch (e) {
+        console.warn('[multi-stop route]', e)
+        fetchRoute(pos, final)
+      }
     }
-
-    if (destCoords && pos) {
-      setDest(destCoords)
-      setDestName(addr)
-      fetchRoute(pos, destCoords)
-    }
-  }, [pos, fetchRoute, profile.id])
+    askRouteMind(final)
+  }, [pos, fetchRoute, geocodeAddr, profile.id])
 
   const completeJob = useCallback((job) => {
     updateJobStatus(job.id, 'completed', profile.id)
@@ -952,7 +1105,7 @@ function DriverAppMain({ profile, onLogout }) {
 
   // ════════════════════════════════════════════════════════════
   return (
-    <div className="h-screen w-screen bg-[#060b18] flex flex-col overflow-hidden text-white" style={{ WebkitUserSelect: 'none', userSelect: 'none' }}>
+    <div ref={appRef} className="h-screen w-screen bg-[#060b18] flex flex-col overflow-hidden text-white" style={{ WebkitUserSelect: 'none', userSelect: 'none' }}>
 
       {/* ── Top Bar ──────────────────────────────────────────── */}
       <div className="flex items-center gap-2 px-3 py-2 bg-[#0d1426] border-b border-violet-500/15 flex-shrink-0">
@@ -1006,6 +1159,14 @@ function DriverAppMain({ profile, onLogout }) {
           gpsState === 'active' ? 'bg-emerald-400 animate-pulse' :
           gpsState === 'denied' ? 'bg-red-400' : 'bg-amber-400'
         }`} />
+
+        {/* Fullscreen toggle */}
+        <button
+          onClick={isFullscreen ? exitFullscreen : enterFullscreen}
+          className="w-7 h-7 flex items-center justify-center rounded-lg border border-slate-800 text-slate-600 hover:text-violet-400 hover:border-violet-500/30 transition-colors"
+          title={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}>
+          <Icon name={isFullscreen ? 'Minimize2' : 'Maximize2'} size={12} />
+        </button>
 
         {/* Logout */}
         <button onClick={onLogout} className="text-slate-700 hover:text-slate-400 transition-colors ml-1">
@@ -1081,6 +1242,18 @@ function DriverAppMain({ profile, onLogout }) {
                   </button>
                 </div>
               )}
+              {/* Multi-stop strip */}
+              {jobStops.length > 1 && (
+                <div className="flex items-center gap-1.5 bg-[#0d1426]/90 backdrop-blur border border-amber-500/20 rounded-xl px-3 py-1.5 mt-1 overflow-x-auto scrollbar-none shadow-lg">
+                  {jobStops.map((stop, i) => (
+                    <div key={i} className="flex items-center gap-1 flex-shrink-0">
+                      <div className="w-4 h-4 rounded-full bg-amber-500 flex items-center justify-center text-[8px] font-bold text-black">{stop.idx}</div>
+                      <span className="text-2xs text-slate-400 max-w-[80px] truncate">{stop.name}</span>
+                      {i < jobStops.length - 1 && <Icon name="ChevronRight" size={10} className="text-slate-700 flex-shrink-0" />}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -1140,17 +1313,35 @@ function DriverAppMain({ profile, onLogout }) {
                 attribution='&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors'
                 url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
               />
-              {/* Driver position */}
+              {/* Route polyline(s) */}
+              {stopRoutes.length > 1
+                ? stopRoutes.map((seg, i) => (
+                    <Polyline key={`seg-${i}`} positions={seg}
+                      pathOptions={{
+                        color: i === 0 ? '#22d3ee' : '#a78bfa',
+                        weight: 5, opacity: 0.9,
+                        dashArray: i === 0 ? undefined : '8 4',
+                      }} />
+                  ))
+                : route && (
+                    <Polyline positions={route}
+                      pathOptions={{ color: '#22d3ee', weight: 5, opacity: 0.9 }} />
+                  )
+              }
+              {/* 🚛 Driver position — truck follows polyline */}
               <Marker position={pos} icon={DRIVER_ICON} />
               {/* GPS accuracy ring */}
               {accuracy && accuracy < 200 && (
                 <Circle center={pos} radius={accuracy}
                   pathOptions={{ color: '#a78bfa', fillColor: '#a78bfa', fillOpacity: 0.05, weight: 1, dashArray: '4 4' }} />
               )}
-              {/* Destination marker */}
-              {destination && <Marker position={destination} icon={DEST_ICON} />}
-              {/* Route polyline */}
-              {route && <Polyline positions={route} pathOptions={{ color: '#22d3ee', weight: 5, opacity: 0.9 }} />}
+              {/* Job stop markers (numbered) — shown when job is active with stops */}
+              {jobStops.length > 0
+                ? jobStops.map((stop, i) => (
+                    <Marker key={`stop-${i}`} position={[stop.lat, stop.lng]} icon={makeStopIcon(stop.idx)} />
+                  ))
+                : destination && <Marker position={destination} icon={DEST_ICON} />
+              }
               {/* Map follow controller */}
               <MapController pos={pos} follow={follow} zoom={16} />
             </MapContainer>
@@ -1418,12 +1609,53 @@ function DriverAppMain({ profile, onLogout }) {
       {tab === 'jobs' && (
         <div className="flex-1 overflow-y-auto scrollbar-none p-4 space-y-3">
 
-          {/* Refresh button */}
-          <button onClick={() => setJobs(loadJobs(profile.id))}
-            className="w-full flex items-center justify-center gap-2 py-2 rounded-xl border border-slate-800/60 text-slate-600 hover:text-slate-400 hover:border-slate-700 text-xs transition-colors">
-            <Icon name="RefreshCw" size={11} />
-            Refresh Jobs
-          </button>
+          {/* Fleet connect + refresh row */}
+          <div className="flex gap-2">
+            <button onClick={() => setJobs(loadJobs(profile.id))}
+              className="flex-1 flex items-center justify-center gap-2 py-2 rounded-xl border border-slate-800/60 text-slate-600 hover:text-slate-400 hover:border-slate-700 text-xs transition-colors">
+              <Icon name="RefreshCw" size={11} />
+              Refresh
+            </button>
+            <button onClick={() => setShowFleetConnect(v => !v)}
+              className="flex-1 flex items-center justify-center gap-2 py-2 rounded-xl border border-violet-500/25 bg-violet-500/5 text-violet-400 hover:bg-violet-500/10 text-xs font-semibold transition-colors">
+              <Icon name="Link2" size={11} />
+              {showFleetConnect ? 'Cancel' : 'Link to Fleet'}
+            </button>
+          </div>
+
+          {/* Fleet link code entry */}
+          {showFleetConnect && (
+            <div className="bg-[#0d1426] border border-violet-500/20 rounded-xl p-4 space-y-3">
+              <div className="flex items-start gap-2">
+                <Icon name="KeyRound" size={14} className="text-violet-400 flex-shrink-0 mt-0.5" />
+                <div>
+                  <div className="text-xs font-semibold text-white">Enter Fleet Pairing Code</div>
+                  <div className="text-2xs text-slate-500 mt-0.5">Get a 6-digit code from your fleet manager to receive jobs and connect to the fleet dashboard.</div>
+                </div>
+              </div>
+              <input
+                value={fleetLinkCode}
+                onChange={e => setFleetLinkCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                placeholder="000000"
+                inputMode="numeric" maxLength={6}
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 text-2xl font-mono tracking-[0.5em] text-[#4a4f5a] placeholder-slate-800 text-center focus:border-violet-500 focus:outline-none"
+              />
+              {fleetLinkError && (
+                <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{fleetLinkError}</div>
+              )}
+              {fleetLinkSuccess && (
+                <div className="text-xs text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-3 py-2">
+                  ✓ Linked to fleet as <span className="font-semibold">{profile.full_name}</span> · {profile.vehicle_reg}
+                </div>
+              )}
+              <button
+                onClick={submitFleetCode}
+                disabled={fleetLinkCode.length !== 6}
+                className="w-full py-2.5 rounded-xl bg-violet-500 hover:bg-violet-600 disabled:opacity-40 text-white text-sm font-semibold transition-colors">
+                Connect to Fleet
+              </button>
+            </div>
+          )}
 
           {jobs.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-3 py-12 text-slate-700">
