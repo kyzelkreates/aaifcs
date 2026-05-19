@@ -15,6 +15,7 @@
  * ============================================================
  */
 
+import { tenantRegistry } from './services_federation_tenantRegistry'
 import { buildDriverSyncPackage, importDriverSyncPackage,
          buildTelemetryPackage, importTelemetryPackage,
          jobTable } from './services_local_localDB'

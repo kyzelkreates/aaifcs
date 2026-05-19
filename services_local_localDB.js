@@ -93,6 +93,15 @@ export function table(key) {
   }
 }
 
+
+// ─── Federation-aware tenant-scoped table ─────────────────────
+// Re-exports tenantTable from tenantRegistry for convenience.
+// Use this for any data that must be tenant-isolated.
+// Example: const myTable = tenantScopedTable('vehicles')
+//   → stores at apex:t:<TENANT_ID>:vehicles (never leaks cross-tenant)
+export { tenantTable as tenantScopedTable } from './services_federation_tenantRegistry'
+export { tenantRegistry } from './services_federation_tenantRegistry'
+
 // ─── Named tables ─────────────────────────────────────────────
 export const vehicleTable   = table(DB_KEYS.VEHICLES)
 export const driverTable    = table(DB_KEYS.DRIVERS)
@@ -157,11 +166,22 @@ export function importDriverSyncPackage(pkg) {
 
 // Build a telemetry update package (driver → fleet)
 export function buildTelemetryPackage(driverId, telemetry) {
+  let tid = 'unknown', eid = 'unknown', sid = 'unknown'
+  try {
+    const id = JSON.parse(localStorage.getItem('apex:federation:identity') || '{}')
+    tid = id.tenant_id       || tid
+    eid = id.fleet_entity_id || eid
+    sid = id.sync_identity   || sid
+  } catch {}
   return {
-    version:   '1.0',
-    type:      'telemetry',
-    ts:        now(),
-    driver_id: driverId,
+    version:         '1.0',
+    type:            'telemetry',
+    ts:              now(),
+    driver_id:       driverId,
+    tenant_id:       tid,
+    fleet_entity_id: eid,
+    sync_identity:   sid,
+    device_id:       localStorage.getItem('apex:device:id') || 'unknown',
     ...telemetry,
   }
 }

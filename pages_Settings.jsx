@@ -5,11 +5,14 @@
  * ============================================================
  */
 
-import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Icon from './components_ui_Icon'
 import Badge from './components_ui_Badge'
+import { useState, useEffect, useCallback } from 'react'
 import { useAppStore, useAuthStore, useAIStore, useMapStore } from './core_storage'
+import { tenantRegistry } from './services_federation_tenantRegistry'
+import { apiUsageTracker } from './services_ai_aiUsageTracker'
+import { localRoutingEngine } from './services_routing_localRoutingEngine'
 import { authService } from './services_supabase_authService'
 import { AI_PROVIDERS } from './services_ai_aiConfig'
 import { MAP_PROVIDERS, PROVIDER_DEFINITIONS } from './services_maps_mapProviders'
@@ -24,6 +27,7 @@ const TABS = [
   { key: 'map',          label: 'Map Config',    icon: 'Map' },
   { key: 'security',     label: 'Security',      icon: 'Shield' },
   { key: 'integrations', label: 'Integrations',  icon: 'Plug' },
+  { key: 'federation',   label: 'Federation',    icon: 'Globe2' },
 ]
 
 // ─── Setting Row ──────────────────────────────────────────────
@@ -506,6 +510,241 @@ function IntegrationsPanel() {
   )
 }
 
+
+// ─────────────────────────────────────────────────────────────
+// Federation Panel — Multi-tenant entity registration + status
+// ─────────────────────────────────────────────────────────────
+function FederationPanel() {
+  const [identity,    setIdentity]    = useState(() => tenantRegistry.getOrCreate())
+  const [companyName, setCompanyName] = useState(identity.company_name || '')
+  const [companyType, setCompanyType] = useState(identity.company_type || 'fleet')
+  const [saved,       setSaved]       = useState(false)
+  const [copied,      setCopied]      = useState(null)
+  const [usage,       setUsage]       = useState(null)
+  const [routing,     setRouting]     = useState(null)
+  const [ccEndpoint,  setCCEndpoint]  = useState(() => localStorage.getItem('apex:cc:endpoint') || '')
+
+  useEffect(() => {
+    setUsage(apiUsageTracker.getSummary(30))
+    setRouting(localRoutingEngine.getStats())
+  }, [])
+
+  const handleSave = () => {
+    const updated = tenantRegistry.update({ company_name: companyName, company_type: companyType })
+    setIdentity(updated)
+    setSaved(true)
+    setTimeout(() => setSaved(false), 2000)
+  }
+
+  const copyText = (text, key) => {
+    navigator.clipboard.writeText(text).catch(() => {
+      const ta = document.createElement('textarea'); ta.value = text
+      document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta)
+    })
+    setCopied(key)
+    setTimeout(() => setCopied(null), 2000)
+  }
+
+  const regenCode = () => {
+    const updated = tenantRegistry.regenerateRegistrationCode()
+    setIdentity(updated)
+  }
+
+  const saveCCEndpoint = () => {
+    localStorage.setItem('apex:cc:endpoint', ccEndpoint)
+    setSaved(true)
+    setTimeout(() => setSaved(false), 2000)
+  }
+
+  const manifest = tenantRegistry.exportManifest()
+
+  const InfoRow = ({ label, value, copyKey }) => (
+    <div className="flex items-center justify-between py-3 border-b border-slate-800/40 last:border-0">
+      <div>
+        <div className="text-xs font-medium text-slate-400">{label}</div>
+        <div className="text-xs font-mono text-white mt-0.5 break-all">{value || '—'}</div>
+      </div>
+      {copyKey && value && (
+        <button onClick={() => copyText(value, copyKey)}
+          className={`ml-3 flex-shrink-0 flex items-center gap-1 px-2 py-1 rounded-lg border text-2xs font-medium transition-colors ${
+            copied === copyKey ? 'border-emerald-500/30 text-emerald-400 bg-emerald-500/8' : 'border-slate-700 text-slate-500 hover:text-slate-300'
+          }`}>
+          <Icon name={copied === copyKey ? 'CheckCircle2' : 'Copy'} size={11} />
+          {copied === copyKey ? 'Copied' : 'Copy'}
+        </button>
+      )}
+    </div>
+  )
+
+  return (
+    <div className="space-y-6">
+      {/* Page header */}
+      <div>
+        <h2 className="text-sm font-bold text-white">Federation & Multi-Tenant Identity</h2>
+        <p className="text-xs text-slate-500 mt-1">
+          This Fleet Control OS instance is an isolated company entity. Use the codes below
+          to connect to the Apex Command Center when it becomes available.
+        </p>
+      </div>
+
+      {/* Registration status badge */}
+      <div className={`flex items-center gap-3 p-3 rounded-xl border ${
+        manifest.paired
+          ? 'bg-emerald-500/6 border-emerald-500/20'
+          : 'bg-amber-500/6 border-amber-500/20'
+      }`}>
+        <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${
+          manifest.paired ? 'bg-emerald-500/15' : 'bg-amber-500/15'
+        }`}>
+          <Icon name={manifest.paired ? 'ShieldCheck' : 'Shield'} size={16}
+            className={manifest.paired ? 'text-emerald-400' : 'text-amber-400'} />
+        </div>
+        <div>
+          <div className={`text-sm font-semibold ${manifest.paired ? 'text-emerald-300' : 'text-amber-300'}`}>
+            {manifest.paired ? 'Paired with Command Center' : 'Standalone — Not yet paired'}
+          </div>
+          <div className="text-2xs text-slate-500">
+            {manifest.paired ? 'Entity registered and verified' : 'Enter registration code in Command Center to pair'}
+          </div>
+        </div>
+      </div>
+
+      {/* Company identity form */}
+      <div className="bg-[#0d1426] border border-slate-800/60 rounded-xl p-5">
+        <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-4">Company Identity</div>
+        <div className="space-y-4">
+          <div>
+            <label className="text-2xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">Company Name</label>
+            <input value={companyName} onChange={e => setCompanyName(e.target.value)}
+              placeholder="e.g. Apex Logistics Ltd"
+              className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-700 focus:border-violet-500 focus:outline-none" />
+          </div>
+          <div>
+            <label className="text-2xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">Fleet Type</label>
+            <select value={companyType} onChange={e => setCompanyType(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white focus:border-violet-500 focus:outline-none">
+              <option value="fleet">Fleet Operator</option>
+              <option value="logistics">Logistics Company</option>
+              <option value="enterprise">Enterprise</option>
+              <option value="courier">Courier Service</option>
+            </select>
+          </div>
+          <button onClick={handleSave}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-colors ${
+              saved ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/20' : 'bg-violet-500 hover:bg-violet-600 text-white'
+            }`}>
+            <Icon name={saved ? 'CheckCircle2' : 'Save'} size={13} />
+            {saved ? 'Saved' : 'Save Identity'}
+          </button>
+        </div>
+      </div>
+
+      {/* Entity codes */}
+      <div className="bg-[#0d1426] border border-slate-800/60 rounded-xl p-5">
+        <div className="flex items-center justify-between mb-4">
+          <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Entity Registration Codes</div>
+          <span className="text-2xs text-slate-600 bg-slate-900 border border-slate-800 px-2 py-1 rounded-lg">
+            Enter these in the Command Center
+          </span>
+        </div>
+
+        {/* Registration code — large display */}
+        <div className="bg-slate-950 border border-violet-500/20 rounded-xl p-4 mb-4 text-center">
+          <div className="text-2xs text-slate-600 uppercase tracking-wider mb-2">Registration Code</div>
+          <div className="text-3xl font-mono font-bold tracking-[0.5em] text-violet-300">{manifest.registration_code}</div>
+          <div className="text-2xs text-slate-600 mt-2">Enter this code in Apex Command Center to pair this installation</div>
+          <div className="flex items-center justify-center gap-2 mt-3">
+            <button onClick={() => copyText(manifest.registration_code, 'reg')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
+                copied === 'reg' ? 'border-emerald-500/30 text-emerald-400 bg-emerald-500/8' : 'border-slate-700 text-slate-400 hover:text-white'
+              }`}>
+              <Icon name={copied === 'reg' ? 'CheckCircle2' : 'Copy'} size={12} />
+              {copied === 'reg' ? 'Copied' : 'Copy Code'}
+            </button>
+            <button onClick={regenCode}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-700 text-slate-500 hover:text-slate-300 text-xs font-medium transition-colors">
+              <Icon name="RefreshCw" size={12} />
+              Regenerate
+            </button>
+          </div>
+        </div>
+
+        <InfoRow label="Tenant ID"       value={manifest.tenant_id}       copyKey="tid" />
+        <InfoRow label="Fleet Entity ID" value={manifest.fleet_entity_id} copyKey="feid" />
+        <InfoRow label="Sync Identity"   value={manifest.sync_identity?.slice(0, 40) + '…'} copyKey="sid" />
+        <InfoRow label="Created"         value={manifest.created_at ? new Date(manifest.created_at).toLocaleString() : '—'} />
+
+        <div className="mt-4">
+          <button onClick={() => copyText(JSON.stringify(tenantRegistry.exportManifest(), null, 2), 'manifest')}
+            className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl border text-xs font-semibold transition-colors ${
+              copied === 'manifest' ? 'border-emerald-500/30 text-emerald-400 bg-emerald-500/8' : 'border-slate-700 text-slate-400 hover:text-white hover:border-slate-600'
+            }`}>
+            <Icon name={copied === 'manifest' ? 'CheckCircle2' : 'FileJson'} size={13} />
+            {copied === 'manifest' ? 'Manifest Copied' : 'Copy Full Manifest JSON'}
+          </button>
+        </div>
+      </div>
+
+      {/* Command Center endpoint (future) */}
+      <div className="bg-[#0d1426] border border-slate-800/60 rounded-xl p-5">
+        <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-4">Command Center Connection</div>
+        <div className="flex items-start gap-2 p-3 rounded-lg bg-slate-900/40 border border-slate-800/30 mb-4">
+          <Icon name="Info" size={13} className="text-cyan-400 flex-shrink-0 mt-0.5" />
+          <p className="text-2xs text-slate-500 leading-relaxed">
+            The Apex Command Center is a future separate system. Configure its endpoint here
+            and this OS will automatically sync telemetry and operational events to it.
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <input value={ccEndpoint} onChange={e => setCCEndpoint(e.target.value)}
+            placeholder="https://command-center.apex.ai/api/ingest"
+            className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder-slate-700 focus:border-violet-500 focus:outline-none" />
+          <button onClick={saveCCEndpoint}
+            className={`px-4 py-2 rounded-xl text-xs font-semibold transition-colors flex-shrink-0 ${
+              saved ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/20' : 'bg-slate-700 hover:bg-slate-600 text-white'
+            }`}>
+            {saved ? 'Saved' : 'Save'}
+          </button>
+        </div>
+      </div>
+
+      {/* Live system metrics */}
+      {(usage || routing) && (
+        <div className="bg-[#0d1426] border border-slate-800/60 rounded-xl p-5">
+          <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-4">System Metrics (30 days)</div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            {[
+              { label: 'API Calls',       value: usage?.total_calls       || 0,   color: 'text-cyan-400'    },
+              { label: 'AI Calls',        value: usage?.ai_calls          || 0,   color: 'text-violet-400'  },
+              { label: 'Local AI Ratio',  value: usage?.local_ai_ratio    || '—', color: 'text-emerald-400' },
+              { label: 'Cache Hits',      value: usage?.cache_hits        || 0,   color: 'text-blue-400'    },
+              { label: 'Route Cache',     value: routing?.cache_ratio     || '—', color: 'text-amber-400'   },
+              { label: 'Patterns Learned',value: routing?.patterns_learned|| 0,   color: 'text-cyan-400'    },
+            ].map(m => (
+              <div key={m.label} className="bg-slate-900/50 border border-slate-800/40 rounded-lg p-3">
+                <div className="text-2xs text-slate-600 mb-1">{m.label}</div>
+                <div className={`text-lg font-mono font-bold ${m.color}`}>{m.value}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Tenant isolation guarantee */}
+      <div className="flex items-start gap-3 p-4 rounded-xl bg-slate-900/40 border border-slate-800/30">
+        <Icon name="Lock" size={14} className="text-emerald-400 flex-shrink-0 mt-0.5" />
+        <div>
+          <div className="text-xs font-semibold text-emerald-300 mb-1">Tenant Isolation Active</div>
+          <p className="text-2xs text-slate-500 leading-relaxed">
+            All data for this installation is stored under the tenant prefix <span className="font-mono text-slate-400">{manifest.tenant_id?.slice(0,20)}…</span>.
+            No data can leak to other Fleet Control OS instances. Federation payloads are signed with this entity's sync identity.
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Settings Page ────────────────────────────────────────────
 export default function Settings() {
   const { user } = useAuthStore(s => ({ user: s.user }))
@@ -518,6 +757,7 @@ export default function Settings() {
     map:          <MapPanel />,
     security:     <SecurityPanel user={user} />,
     integrations: <IntegrationsPanel />,
+    federation:   <FederationPanel />,
   }
 
   return (
