@@ -586,9 +586,147 @@ function LoginScreen({ profile, onLogin, onReset }) {
 }
 
 // ══════════════════════════════════════════════════════════════
+//  FLEET PORTAL LINK MODAL
+//  Shows once per session after login. Driver sees their unique
+//  fleet portal URL + can open it or copy it. Re-openable from top bar.
+// ══════════════════════════════════════════════════════════════
+const SESSION_PORTAL_SHOWN = 'apex:session:portal_shown'
+
+function buildFleetPortalUrl(profile) {
+  // Fleet dashboard = same origin, root path, with driver ID as ref param
+  const base = window.location.origin + window.location.pathname.replace(/\/driver-app.*$/, '')
+  const url  = `${base}#/ap3x?driver=${encodeURIComponent(profile.id)}&reg=${encodeURIComponent(profile.vehicle_reg || '')}`
+  return url
+}
+
+function FleetPortalModal({ profile, onClose }) {
+  const portalUrl = buildFleetPortalUrl(profile)
+  const [copied, setCopied] = useState(false)
+
+  const copyLink = () => {
+    navigator.clipboard.writeText(portalUrl).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    }).catch(() => {
+      // Fallback for browsers that block clipboard
+      const ta = document.createElement('textarea')
+      ta.value = portalUrl
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+
+  const openPortal = () => {
+    window.open(portalUrl, '_blank', 'noopener,noreferrer')
+    onClose()
+  }
+
+  return (
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+      <div className="w-full max-w-sm bg-[#0d1426] border border-violet-500/30 rounded-2xl shadow-2xl overflow-hidden">
+
+        {/* Header */}
+        <div className="px-5 pt-5 pb-4 border-b border-slate-800/60">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-violet-500/15 border border-violet-500/25 flex items-center justify-center flex-shrink-0">
+                <Icon name="Link2" size={18} className="text-violet-400" />
+              </div>
+              <div>
+                <div className="text-sm font-bold text-white">Fleet Control Portal</div>
+                <div className="text-2xs text-slate-500">Your dedicated fleet link</div>
+              </div>
+            </div>
+            <button onClick={onClose} className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-600 hover:text-slate-300 hover:bg-slate-800 transition-colors">
+              <Icon name="X" size={14} />
+            </button>
+          </div>
+        </div>
+
+        {/* Body */}
+        <div className="p-5 space-y-4">
+
+          {/* Driver identity card */}
+          <div className="flex items-center gap-3 p-3 rounded-xl bg-slate-900/60 border border-slate-800/60">
+            <div className="w-9 h-9 rounded-lg bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center flex-shrink-0">
+              <Icon name="User" size={15} className="text-cyan-400" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-sm font-semibold text-white truncate">{profile.full_name}</div>
+              <div className="text-2xs text-slate-500 font-mono">{profile.vehicle_reg} · ID: {profile.id?.slice(0,8) || '—'}</div>
+            </div>
+            <div className="ml-auto flex-shrink-0">
+              <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            </div>
+          </div>
+
+          {/* Info */}
+          <div className="flex items-start gap-2 p-3 rounded-xl bg-violet-500/5 border border-violet-500/15">
+            <Icon name="Info" size={13} className="text-violet-400 flex-shrink-0 mt-0.5" />
+            <p className="text-2xs text-slate-400 leading-relaxed">
+              This is your unique link to the Apex Fleet Control dashboard.
+              Open it on any device to see your vehicle's live position, assigned jobs, and AI safety reports.
+            </p>
+          </div>
+
+          {/* URL display */}
+          <div>
+            <div className="text-2xs text-slate-600 font-semibold uppercase tracking-wider mb-1.5">Your Portal URL</div>
+            <div className="flex items-center gap-2 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5">
+              <Icon name="Globe" size={12} className="text-violet-400 flex-shrink-0" />
+              <span className="text-2xs text-violet-300 font-mono flex-1 break-all leading-relaxed">{portalUrl}</span>
+            </div>
+          </div>
+
+          {/* Actions */}
+          <div className="grid grid-cols-2 gap-2">
+            <button onClick={copyLink}
+              className={`flex items-center justify-center gap-2 py-2.5 rounded-xl border text-xs font-semibold transition-all ${
+                copied
+                  ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
+                  : 'bg-slate-900 border-slate-700 text-slate-400 hover:border-slate-600 hover:text-slate-200'
+              }`}>
+              <Icon name={copied ? 'CheckCircle2' : 'Copy'} size={13} />
+              {copied ? 'Copied!' : 'Copy Link'}
+            </button>
+            <button onClick={openPortal}
+              className="flex items-center justify-center gap-2 py-2.5 rounded-xl bg-violet-500 hover:bg-violet-600 text-white text-xs font-semibold transition-colors">
+              <Icon name="ExternalLink" size={13} />
+              Open Portal
+            </button>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="px-5 pb-4">
+          <button onClick={onClose}
+            className="w-full py-2 text-xs text-slate-600 hover:text-slate-400 transition-colors">
+            Dismiss — I'll open it later
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════
 //  MAIN DRIVER APP
 // ══════════════════════════════════════════════════════════════
 function DriverAppMain({ profile, onLogout }) {
+
+  // ── Fleet Portal Modal — shown once per session after login ──
+  const [showPortal, setShowPortal] = useState(() => {
+    // Only show if not already seen this browser session
+    return !sessionStorage.getItem(SESSION_PORTAL_SHOWN)
+  })
+  const closePortal = () => {
+    sessionStorage.setItem(SESSION_PORTAL_SHOWN, '1')
+    setShowPortal(false)
+  }
 
   // ── GPS state ────────────────────────────────────────────────
   const [pos,      setPos]      = useState(null)
@@ -638,49 +776,53 @@ function DriverAppMain({ profile, onLogout }) {
   const [stopRoutes, setStopRoutes] = useState([])   // [[lat,lng]...] polylines per stop segment
 
   // ── Fullscreen state ─────────────────────────────────────────
+  // IMPORTANT: requestFullscreen MUST be called synchronously inside a click
+  // handler — no async/await, no promise chains, no useCallback wrappers.
+  // Any async gap breaks the browser's user-gesture trust chain and silently fails.
   const [isFullscreen, setIsFullscreen] = useState(false)
   const appRef = useRef(null)
 
-  const enterFullscreen = useCallback(async () => {
-    // Try the root app div first, fall back to documentElement
-    const el = appRef.current ?? document.documentElement
-    try {
-      if (el.requestFullscreen)            { await el.requestFullscreen();            return }
-      if (el.webkitRequestFullscreen)      { el.webkitRequestFullscreen();            return }
-      if (el.mozRequestFullScreen)         { el.mozRequestFullScreen();               return }
-      if (el.msRequestFullscreen)          { el.msRequestFullscreen();                return }
-    } catch (e) {
-      console.warn('[FS] enter failed:', e.message)
-    }
-  }, [])
-
-  const exitFullscreen = useCallback(async () => {
-    try {
-      if (document.exitFullscreen)         { await document.exitFullscreen();         return }
-      if (document.webkitExitFullscreen)   { document.webkitExitFullscreen();         return }
-      if (document.mozCancelFullScreen)    { document.mozCancelFullScreen();          return }
-      if (document.msExitFullscreen)       { document.msExitFullscreen();             return }
-    } catch (e) {
-      console.warn('[FS] exit failed:', e.message)
-    }
-  }, [])
-
-  // Sync state with browser fullscreen events (covers hardware back button,
-  // Escape key, or any external fullscreen change)
+  // Sync state whenever fullscreen changes (Esc key, hardware back, external change)
   useEffect(() => {
     const sync = () => {
-      const inFS = !!(
-        document.fullscreenElement        ||
-        document.webkitFullscreenElement  ||
-        document.mozFullScreenElement     ||
+      setIsFullscreen(!!(
+        document.fullscreenElement       ||
+        document.webkitFullscreenElement ||
+        document.mozFullScreenElement    ||
         document.msFullscreenElement
-      )
-      setIsFullscreen(inFS)
+      ))
     }
-    const events = ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange']
-    events.forEach(e => document.addEventListener(e, sync))
-    return () => events.forEach(e => document.removeEventListener(e, sync))
+    ;['fullscreenchange','webkitfullscreenchange','mozfullscreenchange','MSFullscreenChange']
+      .forEach(ev => document.addEventListener(ev, sync))
+    return () =>
+      ['fullscreenchange','webkitfullscreenchange','mozfullscreenchange','MSFullscreenChange']
+        .forEach(ev => document.removeEventListener(ev, sync))
   }, [])
+
+  // Called synchronously from onClick — do NOT wrap in useCallback or async
+  function doToggleFullscreen() {
+    if (
+      document.fullscreenElement       ||
+      document.webkitFullscreenElement ||
+      document.mozFullScreenElement    ||
+      document.msFullscreenElement
+    ) {
+      // EXIT — already fullscreen
+      ;(document.exitFullscreen       ||
+        document.webkitExitFullscreen ||
+        document.mozCancelFullScreen  ||
+        document.msExitFullscreen     ||
+        (() => {})).call(document)
+    } else {
+      // ENTER — must be direct synchronous call from user gesture
+      const el = document.documentElement          // full page, always works
+      ;(el.requestFullscreen            ||
+        el.webkitRequestFullscreen       ||
+        el.mozRequestFullScreen          ||
+        el.msRequestFullscreen           ||
+        (() => {})).call(el)
+    }
+  }
 
   // ── Fleet link code state ───────────────────────────────────
   const [showFleetConnect, setShowFleetConnect] = useState(false)
@@ -1203,12 +1345,10 @@ function DriverAppMain({ profile, onLogout }) {
     <div
       ref={appRef}
       className="h-screen w-screen bg-[#060b18] flex flex-col overflow-hidden text-white"
-      style={{
-        WebkitUserSelect: 'none',
-        userSelect: 'none',
-        // Ensure proper sizing in fullscreen on all browsers
-        ...(isFullscreen ? { position: 'fixed', inset: 0, zIndex: 9999, height: '100dvh', width: '100dvw' } : {}),
-      }}>
+      style={{ WebkitUserSelect: 'none', userSelect: 'none' }}>
+
+      {/* Fleet Portal Modal — shown once per session right after login */}
+      {showPortal && <FleetPortalModal profile={profile} onClose={closePortal} />}
 
       {/* ── Top Bar ──────────────────────────────────────────── */}
       <div className="flex items-center gap-2 px-3 py-2 bg-[#0d1426] border-b border-violet-500/15 flex-shrink-0">
@@ -1263,11 +1403,20 @@ function DriverAppMain({ profile, onLogout }) {
           gpsState === 'denied' ? 'bg-red-400' : 'bg-amber-400'
         }`} />
 
+        {/* Fleet Portal re-open button */}
+        <button
+          onClick={() => setShowPortal(true)}
+          className="flex items-center gap-1 px-2 py-1 rounded-lg border border-violet-500/25 bg-violet-500/8 text-violet-400 hover:bg-violet-500/15 transition-colors"
+          title="Open your Fleet Control Portal link">
+          <Icon name="Link2" size={11} />
+          <span className="text-2xs font-semibold">Portal</span>
+        </button>
+
         {/* Fullscreen toggle */}
         <button
-          onClick={isFullscreen ? exitFullscreen : enterFullscreen}
+          onClick={doToggleFullscreen}
           className="w-7 h-7 flex items-center justify-center rounded-lg border border-slate-800 text-slate-600 hover:text-violet-400 hover:border-violet-500/30 transition-colors"
-          title={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}>
+          title={isFullscreen ? 'Exit fullscreen (Esc)' : 'Enter fullscreen'}>
           <Icon name={isFullscreen ? 'Minimize2' : 'Maximize2'} size={12} />
         </button>
 
@@ -1475,7 +1624,7 @@ function DriverAppMain({ profile, onLogout }) {
           <div className="absolute right-3 bottom-28 z-[1000] flex flex-col gap-2">
             {/* Fullscreen toggle — always visible on the map */}
             <button
-              onClick={isFullscreen ? exitFullscreen : enterFullscreen}
+              onClick={doToggleFullscreen}
               className="w-10 h-10 rounded-xl border shadow-lg flex items-center justify-center transition-colors bg-[#0d1426]/90 border-slate-700 text-slate-400 hover:border-violet-500/40 hover:text-violet-400"
               title={isFullscreen ? 'Exit fullscreen (Esc)' : 'Fullscreen'}>
               <Icon name={isFullscreen ? 'Minimize2' : 'Maximize2'} size={16} />
