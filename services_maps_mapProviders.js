@@ -14,6 +14,8 @@
  * ============================================================
  */
 
+import { getRuntimeKey, RUNTIME_KEYS } from './services_maps_runtimeKeys'
+
 export const MAP_PROVIDERS = {
   GRAPHHOPPER: 'graphhopper',
   GOOGLE:      'google',
@@ -28,7 +30,7 @@ export const PROVIDER_DEFINITIONS = {
     id:          MAP_PROVIDERS.GRAPHHOPPER,
     name:        'GraphHopper',
     type:        'routing',    // routing engine, pairs with OSM tiles
-    available:   () => !!import.meta.env.VITE_GRAPHHOPPER_API_KEY,
+    available:   () => !!(getRuntimeKey(RUNTIME_KEYS.GRAPHHOPPER) || import.meta.env.VITE_GRAPHHOPPER_API_KEY),
     apiKeyEnv:   'VITE_GRAPHHOPPER_API_KEY',
     routing: {
       baseUrl:   'https://graphhopper.com/api/1',
@@ -55,7 +57,7 @@ export const PROVIDER_DEFINITIONS = {
     id:        MAP_PROVIDERS.GOOGLE,
     name:      'Google Maps',
     type:      'full',
-    available: () => !!import.meta.env.VITE_GOOGLE_MAPS_API_KEY,
+    available: () => !!(getRuntimeKey(RUNTIME_KEYS.GOOGLE_MAPS) || import.meta.env.VITE_GOOGLE_MAPS_API_KEY),
     apiKeyEnv: 'VITE_GOOGLE_MAPS_API_KEY',
     routing: {
       baseUrl:  'https://maps.googleapis.com/maps/api',
@@ -88,7 +90,7 @@ export const PROVIDER_DEFINITIONS = {
     id:        MAP_PROVIDERS.MAPBOX,
     name:      'Mapbox',
     type:      'full',
-    available: () => !!import.meta.env.VITE_MAPBOX_TOKEN,
+    available: () => !!(getRuntimeKey(RUNTIME_KEYS.MAPBOX) || import.meta.env.VITE_MAPBOX_TOKEN),
     apiKeyEnv: 'VITE_MAPBOX_TOKEN',
     routing: {
       baseUrl:  'https://api.mapbox.com',

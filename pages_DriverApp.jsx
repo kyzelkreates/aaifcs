@@ -34,7 +34,9 @@ import {
   listenForDriverMessages,
   sendFleetReply,
 } from './services_sync_driverSyncService'
-import { aiRouter } from './services_ai_aiRouter'
+import { aiRouter }   from './services_ai_aiRouter'
+import { mapService }  from './services_maps_mapService'
+import { getRuntimeKey, RUNTIME_KEYS } from './services_maps_runtimeKeys'
 import { safetyService, ALERT_TYPE, ALERT_SEVERITY } from './services_safety_safetyService'
 
 // ── Fix default Leaflet marker icons ─────────────────────────
@@ -458,6 +460,7 @@ function DriverAppMain({ profile, onLogout }) {
   const [routeInfo,    setRouteInfo]  = useState(null)      // {distance, duration}
   const [routeSteps,   setRouteSteps] = useState([])        // OSRM step objects
   const [stepIdx,      setStepIdx]    = useState(0)
+  const [routeProvider,setRouteProv]  = useState('')
   const [routing,      setRouting]    = useState(false)
   const [follow,       setFollow]     = useState(true)
   const [showSearch,   setShowSearch] = useState(false)
@@ -503,15 +506,21 @@ function DriverAppMain({ profile, onLogout }) {
         if (prevPosRef.current) setTripDist(d => d + haversine(prevPosRef.current, p))
         prevPosRef.current = p
 
-        // Step advancement — check if within 30 m of next waypoint
+        // Step advancement — works with OSRM steps (maneuver.location)
+        // and mapService normalised steps (distance-based threshold on polyline)
         if (route && routeSteps.length > 0) {
           const next = routeSteps[stepIdx]
+          let advanced = false
+          // OSRM: step has maneuver.location [lng, lat]
           if (next?.maneuver?.location) {
             const [lng2, lat2] = next.maneuver.location
-            if (haversine(p, [lat2, lng2]) < 30) {
-              setStepIdx(i => Math.min(i + 1, routeSteps.length - 1))
-            }
+            if (haversine(p, [lat2, lng2]) < 35) advanced = true
           }
+          // GH/Google normalised: step has distance remaining — advance when close to route segment end
+          if (!advanced && next?.distance != null && next.distance < 40) {
+            advanced = true
+          }
+          if (advanced) setStepIdx(i => Math.min(i + 1, routeSteps.length - 1))
         }
 
         // Speeding alert
@@ -604,35 +613,126 @@ function DriverAppMain({ profile, onLogout }) {
     }
   }, [profile])
 
-  // ── OSRM routing ──────────────────────────────────────────────
+
+  // ── Decode Google/GH encoded polyline → [[lat,lng],...] ──────
+  const decodePolyline = (encoded) => {
+    let idx=0,lat=0,lng=0,res=[]
+    while(idx<encoded.length){
+      let b,shift=0,result=0
+      do{b=encoded.charCodeAt(idx++)-63;result|=(b&0x1f)<<shift;shift+=5}while(b>=0x20)
+      lat+=(result&1)?~(result>>1):(result>>1)
+      shift=0;result=0
+      do{b=encoded.charCodeAt(idx++)-63;result|=(b&0x1f)<<shift;shift+=5}while(b>=0x20)
+      lng+=(result&1)?~(result>>1):(result>>1)
+      res.push([lat/1e5,lng/1e5])
+    }
+    return res
+  }
+
+  // ── Parse normalised mapService route → coords + steps ───────
+  const parseServiceRoute = (result) => {
+    if (!result) return null
+    let coords = []
+    const src = result.source || result.activeProvider || ''
+    if (src === 'graphhopper') {
+      const geo = result.geometry
+      if (geo?.type === 'LineString')
+        coords = geo.coordinates.map(([lng,lat]) => [lat,lng])
+      else if (typeof geo === 'string')
+        coords = decodePolyline(geo)
+    } else if (src === 'google') {
+      if (typeof result.geometry === 'string')
+        coords = decodePolyline(result.geometry)
+    } else {
+      // OSRM normalised
+      const geo = result.geometry
+      if (geo?.type === 'LineString')
+        coords = geo.coordinates.map(([lng,lat]) => [lat,lng])
+      else if (Array.isArray(geo))
+        coords = geo
+    }
+    // Steps: normalised mapService format has {text, distance, time}
+    // OSRM raw steps have {maneuver, name, distance}
+    const steps = result.instructions || []
+    return { coords, steps, distance: result.distance||0, duration: result.duration||0, provider: src }
+  }
+
+  // ── Routing: GraphHopper → Google → OSRM fallback ───────────
   const fetchRoute = useCallback(async (from, to) => {
     setRouting(true); setRoute(null); setRouteInfo(null); setRouteSteps([]); setStepIdx(0)
+    let parsed = null
+
+    // ── Try mapService (uses GH or Google if key present) ──────
     try {
-      const url = `${OSRM_URL}/${from[1]},${from[0]};${to[1]},${to[0]}?overview=full&geometries=geojson&steps=true&annotations=false`
-      const data = await fetch(url).then(r => r.json())
-      if (data.code === 'Ok' && data.routes[0]) {
-        const r      = data.routes[0]
-        const coords = r.geometry.coordinates.map(([lng, lat]) => [lat, lng])
-        const steps  = r.legs.flatMap(leg => leg.steps || [])
-        setRoute(coords)
-        setRouteInfo({ distance: r.distance, duration: r.duration })
-        setRouteSteps(steps)
-        setStepIdx(0)
-        // RouteMind AI tip (non-blocking)
-        askRouteMind(to)
+      const result = await mapService.route(
+        { lat: from[0], lng: from[1] },
+        { lat: to[0],   lng: to[1]   }
+      )
+      if (result) {
+        parsed = parseServiceRoute(result)
+        if (parsed?.coords?.length > 1) {
+          setRouteProv(parsed.provider || 'service')
+          console.info('[DriverApp] Route via mapService:', parsed.provider)
+        } else {
+          parsed = null // coords were empty — fall through to OSRM
+        }
       }
-    } catch (e) { console.error('[OSRM]', e) }
+    } catch (e) {
+      console.warn('[DriverApp] mapService routing failed:', e.message)
+    }
+
+    // ── OSRM direct fallback (always works, no key needed) ─────
+    if (!parsed) {
+      try {
+        const url = `${OSRM_URL}/${from[1]},${from[0]};${to[1]},${to[0]}?overview=full&geometries=geojson&steps=true`
+        const data = await fetch(url).then(r => r.json())
+        if (data.code === 'Ok' && data.routes[0]) {
+          const r     = data.routes[0]
+          const coords = r.geometry.coordinates.map(([lng, lat]) => [lat, lng])
+          const steps  = r.legs.flatMap(leg => leg.steps || [])
+          parsed = { coords, steps, distance: r.distance, duration: r.duration, provider: 'osrm' }
+          setRouteProv('osrm')
+          console.info('[DriverApp] Route via OSRM fallback')
+        }
+      } catch (e) { console.error('[DriverApp] OSRM fallback failed:', e.message) }
+    }
+
+    if (parsed && parsed.coords?.length > 1) {
+      setRoute(parsed.coords)
+      setRouteSteps(parsed.steps)
+      setRouteInfo({ distance: parsed.distance, duration: parsed.duration })
+      setStepIdx(0)
+      askRouteMind(to)  // non-blocking RouteMind tip
+    }
     setRouting(false)
   }, [])
 
-  // ── Geocode & select destination ──────────────────────────────
+  // ── Geocode: mapService (GH/Google) → Nominatim fallback ─────
   const doSearch = useCallback(async () => {
     if (!searchQ.trim()) return
     setSearching(true); setSearchRes([])
     try {
-      const r = await fetch(`${NOM_URL}?q=${encodeURIComponent(searchQ)}&format=json&limit=6&countrycodes=gb,ie,fr,de,nl,be,es,it`, {
-        headers: { 'Accept-Language': 'en', 'User-Agent': 'ApexAI-DriverApp/1.0' }
-      })
+      // Try mapService geocode (GH or Google if key present)
+      const results = await mapService.geocode(searchQ)
+      if (results?.length) {
+        // Normalise to {display_name, lat, lon} format
+        setSearchRes(results.map(r => ({
+          display_name: r.address || r.name || '',
+          lat: String(r.lat),
+          lon: String(r.lng),
+        })))
+        setSearching(false)
+        return
+      }
+    } catch (e) {
+      console.warn('[DriverApp] mapService geocode failed:', e.message)
+    }
+    // Nominatim direct fallback
+    try {
+      const r = await fetch(
+        `${NOM_URL}?q=${encodeURIComponent(searchQ)}&format=json&limit=6`,
+        { headers: { 'Accept-Language': 'en', 'User-Agent': 'ApexAI-DriverApp/1.0' } }
+      )
       setSearchRes(await r.json())
     } catch {}
     setSearching(false)
@@ -718,19 +818,30 @@ function DriverAppMain({ profile, onLogout }) {
     const addr = job.destination || job.dropoff_address || job.address || ''
     if (!addr) return
 
-    // Geocode the job address
+    // Try mapService geocode first (GH or Google), then Nominatim
+    let destCoords = null
     try {
-      const r = await fetch(`${NOM_URL}?q=${encodeURIComponent(addr)}&format=json&limit=1`, {
-        headers: { 'Accept-Language': 'en', 'User-Agent': 'ApexAI-DriverApp/1.0' }
-      })
-      const [result] = await r.json()
-      if (result && pos) {
-        const to = [parseFloat(result.lat), parseFloat(result.lon)]
-        setDest(to)
-        setDestName(addr)
-        fetchRoute(pos, to)
+      const results = await mapService.geocode(addr)
+      if (results?.length) {
+        destCoords = [results[0].lat, results[0].lng]
       }
-    } catch {}
+    } catch (e) { console.warn('[Job geocode] mapService failed:', e.message) }
+
+    if (!destCoords) {
+      try {
+        const r = await fetch(`${NOM_URL}?q=${encodeURIComponent(addr)}&format=json&limit=1`, {
+          headers: { 'Accept-Language': 'en', 'User-Agent': 'ApexAI-DriverApp/1.0' }
+        })
+        const [result] = await r.json()
+        if (result) destCoords = [parseFloat(result.lat), parseFloat(result.lon)]
+      } catch {}
+    }
+
+    if (destCoords && pos) {
+      setDest(destCoords)
+      setDestName(addr)
+      fetchRoute(pos, destCoords)
+    }
   }, [pos, fetchRoute, profile.id])
 
   const completeJob = useCallback((job) => {
@@ -777,6 +888,22 @@ function DriverAppMain({ profile, onLogout }) {
         </div>
 
         <div className="flex-1" />
+
+        {/* Active routing provider badge */}
+        {routeProvider && (
+          <div className="flex items-center gap-1 px-2 py-1 rounded-lg border border-slate-800/50 bg-slate-900/60">
+            <Icon name="Route" size={9} className={
+              routeProvider === 'graphhopper' ? 'text-emerald-400' :
+              routeProvider === 'google'      ? 'text-blue-400' :
+              'text-slate-500'
+            } />
+            <span className="text-2xs font-mono text-slate-500 capitalize">{
+              routeProvider === 'graphhopper' ? 'GH' :
+              routeProvider === 'google'      ? 'GMaps' :
+              'OSM'
+            }</span>
+          </div>
+        )}
 
         {/* Speed pill */}
         <div className={`flex items-center gap-1 px-2 py-1 rounded-lg border text-xs font-mono tabular-nums ${

@@ -194,7 +194,7 @@ export const useFleetStore = create((set) => ({
 // ─── Map Store ────────────────────────────────────────────────
 export const useMapStore = create((set) => ({
   // ── State ──
-  provider:   persist.get(STORAGE_KEYS.MAP_PROVIDER, 'mapbox'),
+  provider:   persist.get(STORAGE_KEYS.MAP_PROVIDER, 'osm'),  // OSM is always-on; upgrades auto when GH/Google key set
   center:     persist.get(STORAGE_KEYS.MAP_CENTER, { lat: 51.5074, lng: -0.1278 }),
   zoom:       persist.get(STORAGE_KEYS.MAP_ZOOM, 11),
   layer:      persist.get(STORAGE_KEYS.MAP_LAYER, 'tactical'),

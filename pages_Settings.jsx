@@ -13,6 +13,7 @@ import { useAppStore, useAuthStore, useAIStore, useMapStore } from './core_stora
 import { authService } from './services_supabase_authService'
 import { AI_PROVIDERS } from './services_ai_aiConfig'
 import { MAP_PROVIDERS, PROVIDER_DEFINITIONS } from './services_maps_mapProviders'
+import { getRuntimeKey, setRuntimeKey, RUNTIME_KEYS } from './services_maps_runtimeKeys'
 import { ROUTES } from './config_routes'
 
 // ─── Section tabs ─────────────────────────────────────────────
@@ -232,6 +233,73 @@ function AIPanel() {
 function MapPanel() {
   const { provider, setProvider } = useMapStore(s => ({ provider: s.provider, setProvider: s.setProvider }))
   const providers = Object.values(PROVIDER_DEFINITIONS)
+
+  // Runtime API key state — reads from localStorage, updates live
+  const [ghKey,   setGhKey]  = useState(() => getRuntimeKey(RUNTIME_KEYS.GRAPHHOPPER) || '')
+  const [gmKey,   setGmKey]  = useState(() => getRuntimeKey(RUNTIME_KEYS.GOOGLE_MAPS) || '')
+  const [mbKey,   setMbKey]  = useState(() => getRuntimeKey(RUNTIME_KEYS.MAPBOX) || '')
+  const [saved,   setSaved]  = useState(false)
+  const [testing, setTesting] = useState(null) // 'graphhopper'|'google'|null
+  const [testRes, setTestRes] = useState({})   // { graphhopper: 'ok'|'fail', google: 'ok'|'fail' }
+
+  const saveKeys = () => {
+    setRuntimeKey(RUNTIME_KEYS.GRAPHHOPPER, ghKey)
+    setRuntimeKey(RUNTIME_KEYS.GOOGLE_MAPS, gmKey)
+    setRuntimeKey(RUNTIME_KEYS.MAPBOX,      mbKey)
+    setSaved(true)
+    setTimeout(() => setSaved(false), 2500)
+    // Force provider re-check
+    if (ghKey && provider !== 'graphhopper') setProvider('graphhopper')
+    else if (gmKey && provider === 'osm')    setProvider('google')
+  }
+
+  const testKey = async (which) => {
+    setTesting(which)
+    try {
+      if (which === 'graphhopper') {
+        const key = ghKey || getRuntimeKey(RUNTIME_KEYS.GRAPHHOPPER)
+        const r = await fetch(`https://graphhopper.com/api/1/geocode?q=London&key=${key}&limit=1`)
+        setTestRes(p => ({ ...p, graphhopper: r.ok ? 'ok' : 'fail' }))
+      } else if (which === 'google') {
+        const key = gmKey || getRuntimeKey(RUNTIME_KEYS.GOOGLE_MAPS)
+        const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=London&key=${key}`)
+        const d = await r.json()
+        setTestRes(p => ({ ...p, google: d.status === 'OK' || d.status === 'ZERO_RESULTS' ? 'ok' : 'fail' }))
+      }
+    } catch { setTestRes(p => ({ ...p, [which]: 'fail' })) }
+    setTesting(null)
+  }
+
+  const API_ENTRIES = [
+    {
+      id:    'graphhopper',
+      label: 'GraphHopper API Key',
+      desc:  'Primary routing engine — turn-by-turn, isochrones, matrix',
+      link:  'https://graphhopper.com/#pricing',
+      val:   ghKey, set: setGhKey,
+      test:  () => testKey('graphhopper'),
+      testState: testRes.graphhopper,
+    },
+    {
+      id:    'google',
+      label: 'Google Maps API Key',
+      desc:  'Directions, Places, Geocoding API — enable in Google Cloud Console',
+      link:  'https://console.cloud.google.com/apis',
+      val:   gmKey, set: setGmKey,
+      test:  () => testKey('google'),
+      testState: testRes.google,
+    },
+    {
+      id:    'mapbox',
+      label: 'Mapbox Access Token',
+      desc:  'Dark vector tiles + Mapbox Directions',
+      link:  'https://account.mapbox.com/access-tokens',
+      val:   mbKey, set: setMbKey,
+      test:  null,
+      testState: null,
+    },
+  ]
+
   return (
     <div className="space-y-0">
       <SectionHead label="Map Provider" />
@@ -257,6 +325,70 @@ function MapPanel() {
           )
         })}
       </div>
+
+      <SectionHead label="API Keys" />
+      <div className="space-y-4 mb-6">
+        {API_ENTRIES.map(entry => (
+          <div key={entry.id} className="bg-slate-900/40 border border-slate-800/60 rounded-xl p-4 space-y-2.5">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <div className="text-sm font-semibold text-white">{entry.label}</div>
+                <div className="text-2xs text-slate-600 mt-0.5">{entry.desc}</div>
+              </div>
+              <a href={entry.link} target="_blank" rel="noopener noreferrer"
+                className="text-2xs text-cyan-500 hover:text-cyan-400 flex items-center gap-1 flex-shrink-0 mt-0.5">
+                Get key <Icon name="ExternalLink" size={9} />
+              </a>
+            </div>
+            <div className="flex gap-2">
+              <div className="relative flex-1">
+                <input
+                  type="password"
+                  value={entry.val}
+                  onChange={e => entry.set(e.target.value)}
+                  placeholder={entry.val ? '••••••••••••••••' : `Paste ${entry.label}…`}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-600 focus:border-cyan-500/60 focus:outline-none font-mono pr-8"
+                />
+                {entry.val && (
+                  <div className="absolute right-2.5 top-1/2 -translate-y-1/2">
+                    <div className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                  </div>
+                )}
+              </div>
+              {entry.test && (
+                <button onClick={entry.test} disabled={!entry.val || testing === entry.id}
+                  className={`px-3 py-2 rounded-lg border text-xs font-semibold transition-colors flex items-center gap-1.5 flex-shrink-0 ${
+                    entry.testState === 'ok'   ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400' :
+                    entry.testState === 'fail' ? 'border-red-500/30 bg-red-500/10 text-red-400' :
+                    'border-slate-700 bg-slate-800/60 text-slate-400 hover:text-slate-200'
+                  } disabled:opacity-40`}>
+                  {testing === entry.id
+                    ? <Icon name="Loader2" size={11} className="animate-spin" />
+                    : entry.testState === 'ok'
+                    ? <Icon name="CheckCircle2" size={11} />
+                    : entry.testState === 'fail'
+                    ? <Icon name="XCircle" size={11} />
+                    : <Icon name="Zap" size={11} />}
+                  {entry.testState === 'ok' ? 'Valid' : entry.testState === 'fail' ? 'Failed' : 'Test'}
+                </button>
+              )}
+            </div>
+          </div>
+        ))}
+
+        <button onClick={saveKeys}
+          className={`w-full py-2.5 rounded-xl border text-sm font-semibold transition-all flex items-center justify-center gap-2 ${
+            saved
+              ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400'
+              : 'border-cyan-500/30 bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/15'
+          }`}>
+          {saved ? <><Icon name="CheckCircle2" size={14} /> Saved!</> : <><Icon name="Save" size={14} /> Save API Keys</>}
+        </button>
+        <p className="text-2xs text-slate-700 text-center">
+          Keys are stored in your browser (localStorage). They are never sent to any server other than the provider's own API.
+        </p>
+      </div>
+
       <SectionHead label="OSM / OSRM Fallback" />
       <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-lg p-4 flex items-center gap-3">
         <Icon name="CheckCircle2" size={16} className="text-emerald-400 flex-shrink-0" />

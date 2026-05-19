@@ -9,6 +9,7 @@
  * ============================================================
  */
 
+import { getRuntimeKey, RUNTIME_KEYS } from './services_maps_runtimeKeys'
 import {
   MAP_PROVIDERS,
   PROVIDER_DEFINITIONS,
@@ -20,7 +21,8 @@ import { useMapStore } from './core_storage'
 // ─── GraphHopper Adapter ──────────────────────────────────────
 const graphHopperAdapter = {
   async route(origin, destination, options = {}) {
-    const key = import.meta.env.VITE_GRAPHHOPPER_API_KEY
+    const key = getRuntimeKey(RUNTIME_KEYS.GRAPHHOPPER)
+    if (!key) throw new Error('GraphHopper API key not configured')
     const profile = options.profile || 'car'
     const url = new URL('https://graphhopper.com/api/1/route')
     url.searchParams.set('key', key)
@@ -39,7 +41,8 @@ const graphHopperAdapter = {
   },
 
   async geocode(query) {
-    const key = import.meta.env.VITE_GRAPHHOPPER_API_KEY
+    const key = getRuntimeKey(RUNTIME_KEYS.GRAPHHOPPER)
+    if (!key) throw new Error('GraphHopper API key not configured')
     const url = `https://graphhopper.com/api/1/geocode?q=${encodeURIComponent(query)}&key=${key}&limit=5`
     const res = await fetch(url)
     if (!res.ok) throw new Error(`GraphHopper geocode error: ${res.status}`)
@@ -51,7 +54,8 @@ const graphHopperAdapter = {
 // ─── Google Maps Adapter ──────────────────────────────────────
 const googleAdapter = {
   async route(origin, destination, options = {}) {
-    const key  = import.meta.env.VITE_GOOGLE_MAPS_API_KEY
+    const key  = getRuntimeKey(RUNTIME_KEYS.GOOGLE_MAPS)
+    if (!key) throw new Error('Google Maps API key not configured')
     const mode = options.mode || 'driving'
     const url  = `https://maps.googleapis.com/maps/api/directions/json?origin=${origin.lat},${origin.lng}&destination=${destination.lat},${destination.lng}&mode=${mode}&key=${key}`
     const res  = await fetch(url)
@@ -62,7 +66,8 @@ const googleAdapter = {
   },
 
   async geocode(query) {
-    const key = import.meta.env.VITE_GOOGLE_MAPS_API_KEY
+    const key = getRuntimeKey(RUNTIME_KEYS.GOOGLE_MAPS)
+    if (!key) throw new Error('Google Maps API key not configured')
     const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}&key=${key}`
     const res = await fetch(url)
     if (!res.ok) throw new Error(`Google geocode error: ${res.status}`)
@@ -198,27 +203,33 @@ export const mapService = {
    * @returns Normalised route object
    */
   async route(origin, destination, options = {}) {
-    const preferred  = useMapStore.getState().provider
-    const providers  = [preferred, ...PROVIDER_FALLBACK_CHAIN.filter(p => p !== preferred)]
+    // Build ordered list: stored preference first, then fallback chain (skipping dupes)
+    // But ONLY include providers that have adapters AND available keys
+    const stored    = useMapStore.getState().provider
+    const ordered   = [stored, ...PROVIDER_FALLBACK_CHAIN.filter(p => p !== stored)]
 
-    for (const id of providers) {
+    for (const id of ordered) {
       const def     = PROVIDER_DEFINITIONS[id]
       const adapter = ADAPTERS[id]
+      // Skip if no adapter or key not available
       if (!adapter || !def?.available()) continue
       try {
         console.info(`[MapService] Routing via: ${id}`)
         const result = await adapter.route(origin, destination, options)
         if (result) {
+          // Update stored provider to reflect what actually worked
           useMapStore.getState().setProvider(id)
-          return result
+          return { ...result, activeProvider: id }
         }
       } catch (err) {
-        console.warn(`[MapService] ${id} routing failed, trying next:`, err.message)
+        console.warn(`[MapService] ${id} routing failed:`, err.message)
+        // continue to next
       }
     }
 
-    // Final OSM attempt
+    // Guaranteed OSM/OSRM fallback (no key needed, always works)
     try {
+      console.info('[MapService] Routing via: osrm (final fallback)')
       return await osmAdapter.route(origin, destination)
     } catch (err) {
       console.error('[MapService] All routing providers failed:', err)
@@ -232,10 +243,10 @@ export const mapService = {
    * @returns Array of normalised results
    */
   async geocode(query) {
-    const preferred = useMapStore.getState().provider
-    const providers = [preferred, ...PROVIDER_FALLBACK_CHAIN.filter(p => p !== preferred)]
+    const stored    = useMapStore.getState().provider
+    const ordered   = [stored, ...PROVIDER_FALLBACK_CHAIN.filter(p => p !== stored)]
 
-    for (const id of providers) {
+    for (const id of ordered) {
       const def     = PROVIDER_DEFINITIONS[id]
       const adapter = ADAPTERS[id]
       if (!adapter || !def?.available()) continue
@@ -247,7 +258,7 @@ export const mapService = {
       }
     }
 
-    // Final Nominatim attempt
+    // Nominatim fallback (always free, no key)
     try {
       return await osmAdapter.geocode(query)
     } catch {
