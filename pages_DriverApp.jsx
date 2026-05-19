@@ -587,125 +587,223 @@ function LoginScreen({ profile, onLogin, onReset }) {
 
 // ══════════════════════════════════════════════════════════════
 //  FLEET PORTAL LINK MODAL
-//  Shows once per session after login. Driver sees their unique
-//  fleet portal URL + can open it or copy it. Re-openable from top bar.
+//  First time per session: driver enters their 6-digit pairing code to
+//  link to the fleet dashboard. Connection is saved permanently to their
+//  profile (localStorage). On subsequent sessions, shows saved connection
+//  + Open Portal button. Re-openable from the "Portal" top bar button.
+//
+//  SECURITY: driver gets a view-only link. They cannot access fleet mgmt.
 // ══════════════════════════════════════════════════════════════
 const SESSION_PORTAL_SHOWN = 'apex:session:portal_shown'
+const DRIVER_PORTAL_KEY    = 'apex:driver:portal_link'   // persisted per device
 
-function buildFleetPortalUrl(profile) {
-  // Fleet dashboard = same origin, root path, with driver ID as ref param
-  const base = window.location.origin + window.location.pathname.replace(/\/driver-app.*$/, '')
-  const url  = `${base}#/ap3x?driver=${encodeURIComponent(profile.id)}&reg=${encodeURIComponent(profile.vehicle_reg || '')}`
-  return url
+// Derive a safe fleet portal URL — routes to the AP3X driver view only
+function buildPortalUrl(pairing) {
+  const base = window.location.origin
+  // Opens the fleet dashboard at the AP3X page with the driver's ID pre-filled
+  // Fleet can see the driver's position and telemetry — driver cannot manage fleet
+  return `${base}/#/ap3x?driver=${encodeURIComponent(pairing.driverId)}&reg=${encodeURIComponent(pairing.vehicleReg || '')}&view=driver`
 }
 
 function FleetPortalModal({ profile, onClose }) {
-  const portalUrl = buildFleetPortalUrl(profile)
-  const [copied, setCopied] = useState(false)
+  // Persistent saved pairing for this portal
+  const [saved,   setSaved]   = useState(() => {
+    try { return JSON.parse(localStorage.getItem(DRIVER_PORTAL_KEY) || 'null') } catch { return null }
+  })
+  const [step,    setStep]    = useState(saved ? 'linked' : 'enter')  // 'enter' | 'verifying' | 'linked'
+  const [code,    setCode]    = useState('')
+  const [err,     setErr]     = useState('')
+  const [copied,  setCopied]  = useState(false)
 
-  const copyLink = () => {
-    navigator.clipboard.writeText(portalUrl).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    }).catch(() => {
-      // Fallback for browsers that block clipboard
-      const ta = document.createElement('textarea')
-      ta.value = portalUrl
-      document.body.appendChild(ta)
-      ta.select()
-      document.execCommand('copy')
-      document.body.removeChild(ta)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    })
+  const submitCode = () => {
+    if (code.length !== 6) { setErr('Enter the full 6-digit code from fleet ops'); return }
+    setErr('')
+    setStep('verifying')
+
+    setTimeout(() => {
+      const result = validatePairingCode(code.trim())
+      if (!result.ok) {
+        setErr(result.error)
+        setStep('enter')
+        return
+      }
+      // Save permanently to device — this driver always has this fleet link
+      const pairing = {
+        driverId:   result.driverId   || profile.id,
+        driverName: result.driverName || profile.full_name,
+        vehicleReg: result.vehicleReg || profile.vehicle_reg,
+        linked_at:  new Date().toISOString(),
+        portalUrl:  buildPortalUrl(result),
+      }
+      localStorage.setItem(DRIVER_PORTAL_KEY, JSON.stringify(pairing))
+      setSaved(pairing)
+      setStep('linked')
+    }, 600)
   }
 
   const openPortal = () => {
-    window.open(portalUrl, '_blank', 'noopener,noreferrer')
-    onClose()
+    if (saved?.portalUrl) window.open(saved.portalUrl, '_blank', 'noopener,noreferrer')
+  }
+
+  const copyLink = () => {
+    const url = saved?.portalUrl || ''
+    navigator.clipboard.writeText(url).catch(() => {
+      const ta = document.createElement('textarea')
+      ta.value = url; document.body.appendChild(ta); ta.select()
+      document.execCommand('copy'); document.body.removeChild(ta)
+    }).finally(() => { setCopied(true); setTimeout(() => setCopied(false), 2000) })
+    setCopied(true); setTimeout(() => setCopied(false), 2000)
+  }
+
+  const unlink = () => {
+    localStorage.removeItem(DRIVER_PORTAL_KEY)
+    setSaved(null); setStep('enter'); setCode(''); setErr('')
   }
 
   return (
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/85 backdrop-blur-sm p-4">
       <div className="w-full max-w-sm bg-[#0d1426] border border-violet-500/30 rounded-2xl shadow-2xl overflow-hidden">
 
-        {/* Header */}
-        <div className="px-5 pt-5 pb-4 border-b border-slate-800/60">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-violet-500/15 border border-violet-500/25 flex items-center justify-center flex-shrink-0">
-                <Icon name="Link2" size={18} className="text-violet-400" />
-              </div>
-              <div>
-                <div className="text-sm font-bold text-white">Fleet Control Portal</div>
-                <div className="text-2xs text-slate-500">Your dedicated fleet link</div>
+        {/* ── Header ── */}
+        <div className="px-5 pt-5 pb-4 border-b border-slate-800/50 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-violet-500/15 border border-violet-500/20 flex items-center justify-center flex-shrink-0">
+              <Icon name={step === 'linked' ? 'ShieldCheck' : 'Link2'} size={16} className="text-violet-400" />
+            </div>
+            <div>
+              <div className="text-sm font-bold text-white">Fleet Control Portal</div>
+              <div className="text-2xs text-slate-500">
+                {step === 'linked' ? 'Connected to fleet dashboard' : 'Link your device to fleet'}
               </div>
             </div>
-            <button onClick={onClose} className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-600 hover:text-slate-300 hover:bg-slate-800 transition-colors">
-              <Icon name="X" size={14} />
-            </button>
           </div>
+          <button onClick={onClose} className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-600 hover:text-white hover:bg-slate-800 transition-colors">
+            <Icon name="X" size={14} />
+          </button>
         </div>
 
-        {/* Body */}
         <div className="p-5 space-y-4">
 
-          {/* Driver identity card */}
-          <div className="flex items-center gap-3 p-3 rounded-xl bg-slate-900/60 border border-slate-800/60">
-            <div className="w-9 h-9 rounded-lg bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center flex-shrink-0">
-              <Icon name="User" size={15} className="text-cyan-400" />
-            </div>
-            <div className="min-w-0">
-              <div className="text-sm font-semibold text-white truncate">{profile.full_name}</div>
-              <div className="text-2xs text-slate-500 font-mono">{profile.vehicle_reg} · ID: {profile.id?.slice(0,8) || '—'}</div>
-            </div>
-            <div className="ml-auto flex-shrink-0">
-              <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            </div>
-          </div>
+          {/* ── ENTER CODE STEP ── */}
+          {(step === 'enter' || step === 'verifying') && (<>
 
-          {/* Info */}
-          <div className="flex items-start gap-2 p-3 rounded-xl bg-violet-500/5 border border-violet-500/15">
-            <Icon name="Info" size={13} className="text-violet-400 flex-shrink-0 mt-0.5" />
-            <p className="text-2xs text-slate-400 leading-relaxed">
-              This is your unique link to the Apex Fleet Control dashboard.
-              Open it on any device to see your vehicle's live position, assigned jobs, and AI safety reports.
-            </p>
-          </div>
-
-          {/* URL display */}
-          <div>
-            <div className="text-2xs text-slate-600 font-semibold uppercase tracking-wider mb-1.5">Your Portal URL</div>
-            <div className="flex items-center gap-2 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5">
-              <Icon name="Globe" size={12} className="text-violet-400 flex-shrink-0" />
-              <span className="text-2xs text-violet-300 font-mono flex-1 break-all leading-relaxed">{portalUrl}</span>
+            {/* Info banner */}
+            <div className="flex items-start gap-2.5 p-3 rounded-xl bg-violet-500/6 border border-violet-500/15">
+              <Icon name="Info" size={13} className="text-violet-400 flex-shrink-0 mt-0.5" />
+              <p className="text-2xs text-slate-400 leading-relaxed">
+                Enter the <span className="text-violet-300 font-semibold">6-digit code</span> from your fleet manager.
+                This connects your driver app to the fleet dashboard — you'll get a personal portal link saved to this device permanently.
+              </p>
             </div>
-          </div>
 
-          {/* Actions */}
-          <div className="grid grid-cols-2 gap-2">
-            <button onClick={copyLink}
-              className={`flex items-center justify-center gap-2 py-2.5 rounded-xl border text-xs font-semibold transition-all ${
-                copied
-                  ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
-                  : 'bg-slate-900 border-slate-700 text-slate-400 hover:border-slate-600 hover:text-slate-200'
-              }`}>
-              <Icon name={copied ? 'CheckCircle2' : 'Copy'} size={13} />
-              {copied ? 'Copied!' : 'Copy Link'}
+            {/* Driver identity */}
+            <div className="flex items-center gap-2.5 p-3 rounded-xl bg-slate-900/60 border border-slate-800/50">
+              <div className="w-8 h-8 rounded-lg bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center flex-shrink-0">
+                <Icon name="User" size={13} className="text-cyan-400" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs font-semibold text-white truncate">{profile.full_name}</div>
+                <div className="text-2xs text-slate-500 font-mono">{profile.vehicle_reg}</div>
+              </div>
+            </div>
+
+            {/* Code input */}
+            <div>
+              <label className="text-2xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">
+                Fleet Pairing Code
+              </label>
+              <input
+                value={code}
+                onChange={e => { setCode(e.target.value.replace(/\D/g,'').slice(0,6)); setErr('') }}
+                onKeyDown={e => e.key === 'Enter' && submitCode()}
+                placeholder="000000"
+                type="text" inputMode="numeric" maxLength={6} autoFocus
+                disabled={step === 'verifying'}
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 text-2xl font-mono tracking-[0.5em] text-center text-white placeholder-slate-800 focus:border-violet-500 focus:outline-none disabled:opacity-50"
+              />
+            </div>
+
+            {err && (
+              <div className="flex items-center gap-2 p-2.5 rounded-lg bg-red-500/10 border border-red-500/20">
+                <Icon name="AlertCircle" size={12} className="text-red-400 flex-shrink-0" />
+                <span className="text-2xs text-red-400">{err}</span>
+              </div>
+            )}
+
+            <button
+              onClick={submitCode}
+              disabled={code.length !== 6 || step === 'verifying'}
+              className="w-full flex items-center justify-center gap-2 bg-violet-500 hover:bg-violet-600 disabled:opacity-40 text-white font-semibold rounded-xl py-3 text-sm transition-colors">
+              {step === 'verifying'
+                ? <><Icon name="Loader2" size={14} className="animate-spin" /> Verifying…</>
+                : <><Icon name="Link2" size={14} /> Connect to Fleet</>
+              }
             </button>
-            <button onClick={openPortal}
-              className="flex items-center justify-center gap-2 py-2.5 rounded-xl bg-violet-500 hover:bg-violet-600 text-white text-xs font-semibold transition-colors">
-              <Icon name="ExternalLink" size={13} />
-              Open Portal
+          </>)}
+
+          {/* ── LINKED STEP ── */}
+          {step === 'linked' && saved && (<>
+
+            {/* Success badge */}
+            <div className="flex items-center gap-2.5 p-3 rounded-xl bg-emerald-500/8 border border-emerald-500/20">
+              <Icon name="CheckCircle2" size={16} className="text-emerald-400 flex-shrink-0" />
+              <div>
+                <div className="text-xs font-semibold text-emerald-300">Fleet connection active</div>
+                <div className="text-2xs text-slate-500">
+                  Linked {new Date(saved.linked_at).toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' })}
+                </div>
+              </div>
+            </div>
+
+            {/* Pairing details */}
+            <div className="space-y-2">
+              <div className="flex items-center gap-2.5 p-3 rounded-xl bg-slate-900/60 border border-slate-800/50">
+                <Icon name="User" size={13} className="text-cyan-400 flex-shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs font-semibold text-white truncate">{saved.driverName}</div>
+                  <div className="text-2xs text-slate-500 font-mono">{saved.vehicleReg}</div>
+                </div>
+                <div className="w-2 h-2 rounded-full bg-emerald-400 flex-shrink-0" />
+              </div>
+
+              {/* Portal URL display */}
+              <div className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5">
+                <div className="text-2xs text-slate-600 mb-1 font-semibold uppercase tracking-wider">Your Portal Link</div>
+                <div className="text-2xs text-violet-300 font-mono break-all leading-relaxed">{saved.portalUrl}</div>
+              </div>
+            </div>
+
+            {/* Action buttons */}
+            <div className="grid grid-cols-2 gap-2">
+              <button onClick={copyLink}
+                className={`flex items-center justify-center gap-1.5 py-2.5 rounded-xl border text-xs font-semibold transition-all ${
+                  copied ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
+                         : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-white hover:border-slate-600'
+                }`}>
+                <Icon name={copied ? 'CheckCircle2' : 'Copy'} size={12} />
+                {copied ? 'Copied!' : 'Copy Link'}
+              </button>
+              <button onClick={openPortal}
+                className="flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-violet-500 hover:bg-violet-600 text-white text-xs font-semibold transition-colors">
+                <Icon name="ExternalLink" size={12} />
+                Open Portal
+              </button>
+            </div>
+
+            {/* Unlink option */}
+            <button onClick={unlink}
+              className="w-full text-2xs text-slate-700 hover:text-red-400 transition-colors py-1 text-center">
+              Unlink from this fleet
             </button>
-          </div>
+          </>)}
+
         </div>
 
         {/* Footer */}
-        <div className="px-5 pb-4">
+        <div className="px-5 pb-4 pt-0">
           <button onClick={onClose}
-            className="w-full py-2 text-xs text-slate-600 hover:text-slate-400 transition-colors">
-            Dismiss — I'll open it later
+            className="w-full py-2 text-2xs text-slate-700 hover:text-slate-500 transition-colors">
+            Close
           </button>
         </div>
       </div>
@@ -776,13 +874,15 @@ function DriverAppMain({ profile, onLogout }) {
   const [stopRoutes, setStopRoutes] = useState([])   // [[lat,lng]...] polylines per stop segment
 
   // ── Fullscreen state ─────────────────────────────────────────
-  // IMPORTANT: requestFullscreen MUST be called synchronously inside a click
-  // handler — no async/await, no promise chains, no useCallback wrappers.
-  // Any async gap breaks the browser's user-gesture trust chain and silently fails.
+  // Native event listener approach: bypass React's synthetic event system
+  // entirely. React's onClick wraps events in a synthetic layer that can
+  // break the browser's user-gesture trust chain on mobile browsers.
+  // We attach the handler directly to the DOM node via useEffect.
   const [isFullscreen, setIsFullscreen] = useState(false)
   const appRef = useRef(null)
+  const fsButtonRef = useRef(null)   // attached to the topbar FS button
 
-  // Sync state whenever fullscreen changes (Esc key, hardware back, external change)
+  // Sync React state with browser fullscreen state
   useEffect(() => {
     const sync = () => {
       setIsFullscreen(!!(
@@ -792,37 +892,63 @@ function DriverAppMain({ profile, onLogout }) {
         document.msFullscreenElement
       ))
     }
-    ;['fullscreenchange','webkitfullscreenchange','mozfullscreenchange','MSFullscreenChange']
-      .forEach(ev => document.addEventListener(ev, sync))
-    return () =>
-      ['fullscreenchange','webkitfullscreenchange','mozfullscreenchange','MSFullscreenChange']
-        .forEach(ev => document.removeEventListener(ev, sync))
+    const EVENTS = ['fullscreenchange','webkitfullscreenchange','mozfullscreenchange','MSFullscreenChange']
+    EVENTS.forEach(ev => document.addEventListener(ev, sync))
+    return () => EVENTS.forEach(ev => document.removeEventListener(ev, sync))
   }, [])
 
-  // Called synchronously from onClick — do NOT wrap in useCallback or async
-  function doToggleFullscreen() {
-    if (
-      document.fullscreenElement       ||
-      document.webkitFullscreenElement ||
-      document.mozFullScreenElement    ||
-      document.msFullscreenElement
-    ) {
-      // EXIT — already fullscreen
-      ;(document.exitFullscreen       ||
-        document.webkitExitFullscreen ||
-        document.mozCancelFullScreen  ||
-        document.msExitFullscreen     ||
-        (() => {})).call(document)
-    } else {
-      // ENTER — must be direct synchronous call from user gesture
-      const el = document.documentElement          // full page, always works
-      ;(el.requestFullscreen            ||
-        el.webkitRequestFullscreen       ||
-        el.mozRequestFullScreen          ||
-        el.msRequestFullscreen           ||
-        (() => {})).call(el)
+  // Attach native click to the FS button — fires before any React processing
+  useEffect(() => {
+    const btn = fsButtonRef.current
+    if (!btn) return
+    const handler = () => {
+      const inFS = !!(
+        document.fullscreenElement       ||
+        document.webkitFullscreenElement ||
+        document.mozFullScreenElement    ||
+        document.msFullscreenElement
+      )
+      if (inFS) {
+        const exit = document.exitFullscreen || document.webkitExitFullscreen ||
+                     document.mozCancelFullScreen || document.msExitFullscreen
+        if (exit) exit.call(document)
+      } else {
+        const el = document.documentElement
+        const enter = el.requestFullscreen || el.webkitRequestFullscreen ||
+                      el.mozRequestFullScreen || el.msRequestFullscreen
+        if (enter) enter.call(el)
+      }
     }
-  }
+    btn.addEventListener('click', handler)
+    return () => btn.removeEventListener('click', handler)
+  }, [])
+
+  // doToggleFullscreen kept for map overlay button (also native-attached below)
+  const mapFsBtnRef = useRef(null)
+  useEffect(() => {
+    const btn = mapFsBtnRef.current
+    if (!btn) return
+    const handler = () => {
+      const inFS = !!(
+        document.fullscreenElement       ||
+        document.webkitFullscreenElement ||
+        document.mozFullScreenElement    ||
+        document.msFullscreenElement
+      )
+      if (inFS) {
+        const exit = document.exitFullscreen || document.webkitExitFullscreen ||
+                     document.mozCancelFullScreen || document.msExitFullscreen
+        if (exit) exit.call(document)
+      } else {
+        const el = document.documentElement
+        const enter = el.requestFullscreen || el.webkitRequestFullscreen ||
+                      el.mozRequestFullScreen || el.msRequestFullscreen
+        if (enter) enter.call(el)
+      }
+    }
+    btn.addEventListener('click', handler)
+    return () => btn.removeEventListener('click', handler)
+  }, [])
 
   // ── Fleet link code state ───────────────────────────────────
   const [showFleetConnect, setShowFleetConnect] = useState(false)
@@ -1403,18 +1529,28 @@ function DriverAppMain({ profile, onLogout }) {
           gpsState === 'denied' ? 'bg-red-400' : 'bg-amber-400'
         }`} />
 
-        {/* Fleet Portal re-open button */}
-        <button
-          onClick={() => setShowPortal(true)}
-          className="flex items-center gap-1 px-2 py-1 rounded-lg border border-violet-500/25 bg-violet-500/8 text-violet-400 hover:bg-violet-500/15 transition-colors"
-          title="Open your Fleet Control Portal link">
-          <Icon name="Link2" size={11} />
-          <span className="text-2xs font-semibold">Portal</span>
-        </button>
+        {/* Fleet Portal button — green dot when linked, amber when not */}
+        {(() => {
+          let linked = false
+          try { linked = !!JSON.parse(localStorage.getItem('apex:driver:portal_link') || 'null') } catch {}
+          return (
+            <button
+              onClick={() => setShowPortal(true)}
+              className={`flex items-center gap-1 px-2 py-1 rounded-lg border text-2xs font-semibold transition-colors ${
+                linked
+                  ? 'border-emerald-500/30 bg-emerald-500/8 text-emerald-400 hover:bg-emerald-500/15'
+                  : 'border-amber-500/25 bg-amber-500/8 text-amber-400 hover:bg-amber-500/15'
+              }`}
+              title={linked ? 'Fleet portal linked — tap to open' : 'Tap to link fleet portal'}>
+              <Icon name={linked ? 'ShieldCheck' : 'Link2'} size={11} />
+              <span>Portal</span>
+            </button>
+          )
+        })()}
 
-        {/* Fullscreen toggle */}
+        {/* Fullscreen toggle — native listener via ref, bypasses React synthetic events */}
         <button
-          onClick={doToggleFullscreen}
+          ref={fsButtonRef}
           className="w-7 h-7 flex items-center justify-center rounded-lg border border-slate-800 text-slate-600 hover:text-violet-400 hover:border-violet-500/30 transition-colors"
           title={isFullscreen ? 'Exit fullscreen (Esc)' : 'Enter fullscreen'}>
           <Icon name={isFullscreen ? 'Minimize2' : 'Maximize2'} size={12} />
@@ -1622,9 +1758,9 @@ function DriverAppMain({ profile, onLogout }) {
 
           {/* Map overlay controls */}
           <div className="absolute right-3 bottom-28 z-[1000] flex flex-col gap-2">
-            {/* Fullscreen toggle — always visible on the map */}
+            {/* Fullscreen toggle — native listener via mapFsBtnRef */}
             <button
-              onClick={doToggleFullscreen}
+              ref={mapFsBtnRef}
               className="w-10 h-10 rounded-xl border shadow-lg flex items-center justify-center transition-colors bg-[#0d1426]/90 border-slate-700 text-slate-400 hover:border-violet-500/40 hover:text-violet-400"
               title={isFullscreen ? 'Exit fullscreen (Esc)' : 'Fullscreen'}>
               <Icon name={isFullscreen ? 'Minimize2' : 'Maximize2'} size={16} />
