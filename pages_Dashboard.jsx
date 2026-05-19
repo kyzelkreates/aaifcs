@@ -245,10 +245,14 @@ function DriverAppPanel({ drivers, vehicles }) {
   const [replyInput,     setReplyInput]     = useState('')
   const [aiReplying,     setAiReplying]     = useState(false)
   const [aiReports,      setAiReports]      = useState(() => getDriverAIReportHistory(80))
-  const [pairingCode,    setPairingCode]    = useState('')
-  const [codeExpiry,     setCodeExpiry]     = useState(null)
-  const [activeCodes,    setActiveCodes]    = useState(() => getActivePairingCodes())
-  const [codeGenDriver,  setCodeGenDriver]  = useState('')
+  const [pairingCode,         setPairingCode]         = useState('')
+  const [codeExpiry,          setCodeExpiry]          = useState(null)
+  const [activeCodes,         setActiveCodes]         = useState(() => getActivePairingCodes())
+  const [codeGenDriver,       setCodeGenDriver]       = useState('')
+  const [pairingQR,           setPairingQR]           = useState('')
+  const [pairingDriverName,   setPairingDriverName]   = useState('')
+  const [pairingDriverReg,    setPairingDriverReg]    = useState('')
+  const [pairingDriverAppURL, setPairingDriverAppURL] = useState('')
   const feedRef    = useRef(null)
   const chatEndRef = useRef(null)
   const { sendMessage: aiSend } = useAIChat('Sentinel')
@@ -299,18 +303,41 @@ function DriverAppPanel({ drivers, vehicles }) {
 
   // ── Pairing code generator ─────────────────────────────────
   const generateCode = () => {
-    const driver   = drivers.find(d => d.id === codeGenDriver)
+    const driver   = drivers?.find(d => d.id === codeGenDriver) || null
     const driverId = codeGenDriver || `guest-${Date.now()}`
     const name     = driver?.full_name || 'Driver'
     const reg      = driver?.vehicle_reg || '—'
-    const code     = generatePairingCode(driverId, name, reg, 60)
+    // Build the AP3X driver-app URL (never the fleet dashboard)
+    const driverAppURL = `${window.location.href.split('#')[0]}#/driver-app`
+    const code = generatePairingCode(driverId, name, reg, 60)
     setPairingCode(code)
+    setPairingDriverName(name)
+    setPairingDriverReg(reg)
+    setPairingDriverAppURL(driverAppURL)
     setCodeExpiry(new Date(Date.now() + 60 * 60 * 1000))
     setActiveCodes(getActivePairingCodes())
+    // Build QR — encodes the driver app URL so driver can scan to open the app
+    const qrData = encodeURIComponent(driverAppURL)
+    setPairingQR(`https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${qrData}&bgcolor=060b18&color=a78bfa&margin=4`)
   }
 
   const copyCode = async () => {
     try { await navigator.clipboard.writeText(pairingCode) } catch {}
+  }
+
+  const sharePairingWhatsApp = () => {
+    const text = encodeURIComponent(
+      `Hi ${pairingDriverName},\n\nYour AP3X Driver pairing code is: *${pairingCode}*\n\nSteps:\n1. Open the AP3X Driver app: ${pairingDriverAppURL}\n2. Enter code: ${pairingCode}\n\nCode expires in 60 mins. — Apex Fleet Ops`
+    )
+    window.open(`https://wa.me/?text=${text}`, '_blank')
+  }
+
+  const sharePairingEmail = () => {
+    const subj = encodeURIComponent(`[Apex AI] Your driver pairing code: ${pairingCode}`)
+    const body = encodeURIComponent(
+      `Hi ${pairingDriverName},\n\nYour AP3X Driver pairing code is: ${pairingCode}\n\nHow to get started:\n1. Open the AP3X Driver app:\n   ${pairingDriverAppURL}\n\n2. On the setup screen, enter your 6-digit code: ${pairingCode}\n\n3. Confirm your name and set a PIN.\n\nThis code is valid for 60 minutes.\n\n— Apex Fleet Operations`
+    )
+    window.open(`mailto:?subject=${subj}&body=${body}`, '_blank')
   }
 
   // ── Send fleet reply ───────────────────────────────────────
@@ -422,21 +449,46 @@ function DriverAppPanel({ drivers, vehicles }) {
             </div>
 
             {pairingCode && (
-              <div className="flex flex-col items-center gap-3 p-5 bg-[#060b18] border border-violet-500/25 rounded-xl">
+              <div className="flex flex-col items-center gap-4 p-5 bg-[#060b18] border border-violet-500/25 rounded-xl">
+                {/* Code */}
                 <div className="text-2xs text-slate-500 uppercase tracking-widest font-semibold">AP3X Pairing Code</div>
-                <div className="text-5xl font-mono font-bold tracking-[0.25em] text-white select-all">{pairingCode}</div>
+                <div className="text-5xl font-mono font-bold tracking-[0.3em] text-white select-all px-4 py-3 bg-slate-900/60 rounded-2xl border border-violet-500/20">
+                  {pairingCode}
+                </div>
                 {codeExpiry && (
-                  <div className="text-2xs text-slate-500">Valid for 60 minutes · expires {codeExpiry.toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit' })}</div>
+                  <div className="text-2xs text-slate-500">Valid 60 min · expires {codeExpiry.toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit' })}</div>
                 )}
-                <div className="flex gap-2 mt-1">
+
+                {/* QR code — scans to open driver app */}
+                {pairingQR && (
+                  <div className="flex flex-col items-center gap-2">
+                    <div className="text-2xs text-slate-600 uppercase tracking-wider">Scan to open driver app</div>
+                    <img src={pairingQR} alt="Driver App QR" className="w-[160px] h-[160px] rounded-xl border border-violet-500/20" />
+                    <div className="text-2xs text-slate-700 text-center">Scan opens AP3X Driver app · then enter code above</div>
+                  </div>
+                )}
+
+                {/* Share buttons */}
+                <div className="w-full grid grid-cols-3 gap-2">
                   <button onClick={copyCode}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-400 hover:text-white text-xs transition-colors">
-                    <Icon name="Copy" size={11} /> Copy Code
+                    className="flex flex-col items-center gap-1.5 px-2 py-2.5 rounded-xl bg-slate-800/80 border border-slate-700 text-slate-400 hover:text-white hover:border-slate-500 text-xs transition-colors">
+                    <Icon name="Copy" size={14} />
+                    <span className="text-2xs">Copy Code</span>
+                  </button>
+                  <button onClick={sharePairingWhatsApp}
+                    className="flex flex-col items-center gap-1.5 px-2 py-2.5 rounded-xl bg-[#25d366]/8 border border-[#25d366]/25 text-[#25d366] hover:bg-[#25d366]/15 text-xs transition-colors">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/><path d="M12 2C6.48 2 2 6.48 2 12c0 1.85.5 3.58 1.37 5.07L2 22l5.07-1.35C8.46 21.51 10.2 22 12 22c5.52 0 10-4.48 10-10S17.52 2 12 2zm0 18c-1.69 0-3.27-.47-4.63-1.28l-.33-.2-3.01.8.82-2.96-.22-.35C3.47 14.76 3 13.44 3 12 3 7.03 7.03 3 12 3s9 4.03 9 9-4.03 9-9 9z"/></svg>
+                    <span className="text-2xs">WhatsApp</span>
+                  </button>
+                  <button onClick={sharePairingEmail}
+                    className="flex flex-col items-center gap-1.5 px-2 py-2.5 rounded-xl bg-blue-500/8 border border-blue-500/25 text-blue-400 hover:bg-blue-500/15 text-xs transition-colors">
+                    <Icon name="Mail" size={14} />
+                    <span className="text-2xs">Email</span>
                   </button>
                 </div>
-                <div className="text-2xs text-slate-600 text-center leading-relaxed">
-                  Tell the driver: open the AP3X Driver app and enter this code.<br />
-                  <span className="text-amber-500/70">Do not share the fleet dashboard link.</span>
+
+                <div className="text-2xs text-slate-700 text-center leading-relaxed">
+                  Driver opens AP3X app → enters code → paired instantly
                 </div>
               </div>
             )}

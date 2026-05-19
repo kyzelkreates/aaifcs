@@ -403,7 +403,7 @@ function SetupScreen({ onReady }) {
                 placeholder="000000"
                 type="text" inputMode="numeric" maxLength={6} autoFocus
                 onKeyDown={e => e.key === 'Enter' && submitCode()}
-                className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-3 text-2xl text-white placeholder-slate-700 focus:border-violet-500 focus:outline-none font-mono tracking-[0.5em] text-center"
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-3 text-2xl text-[#4a4f5a] placeholder-slate-800 focus:border-violet-500 focus:outline-none font-mono tracking-[0.5em] text-center"
               />
             </div>
             {err && <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{err}</div>}
@@ -418,19 +418,19 @@ function SetupScreen({ onReady }) {
               <Icon name="CheckCircle2" size={16} className="text-emerald-400 flex-shrink-0" />
               <div>
                 <div className="text-xs font-semibold text-emerald-300">Code verified ✓</div>
-                <div className="text-2xs text-slate-500 font-mono">Vehicle: {paired?.vehicleReg || '—'}</div>
+                <div className="text-2xs text-[#4a4f5a] font-mono">Vehicle: {paired?.vehicleReg || '—'}</div>
               </div>
             </div>
             <div>
               <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">Your Name</label>
               <input value={name} onChange={e => setName(e.target.value)} placeholder="Confirm your name"
-                className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:border-violet-500 focus:outline-none" />
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-[#4a4f5a] placeholder-slate-700 focus:border-violet-500 focus:outline-none" />
             </div>
             <div>
               <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">Set a PIN (4+ digits)</label>
               <input value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, ''))} type="password"
                 inputMode="numeric" maxLength={8} placeholder="••••"
-                className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:border-violet-500 focus:outline-none" />
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-[#4a4f5a] placeholder-slate-700 focus:border-violet-500 focus:outline-none" />
             </div>
             {err && <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{err}</div>}
             <button onClick={submitProfile}
