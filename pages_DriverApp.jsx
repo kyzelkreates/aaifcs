@@ -77,6 +77,22 @@ const makeStopIcon = (num) => new L.DivIcon({
 })
 const WAYPOINT_ICON = makeStopIcon('●')
 
+// ── Fullscreen CSS — ensures the element fills screen on all browsers ──────
+const FS_STYLE_ID = 'apex-fullscreen-style'
+if (!document.getElementById(FS_STYLE_ID)) {
+  const s = document.createElement('style')
+  s.id = FS_STYLE_ID
+  s.textContent = `
+    :fullscreen                { width:100dvw!important; height:100dvh!important; background:#060b18; }
+    :-webkit-full-screen       { width:100dvw!important; height:100dvh!important; background:#060b18; }
+    :-moz-full-screen          { width:100dvw!important; height:100dvh!important; background:#060b18; }
+    :-ms-fullscreen            { width:100dvw!important; height:100dvh!important; background:#060b18; }
+    :fullscreen .leaflet-container { height:100%!important; }
+    :-webkit-full-screen .leaflet-container { height:100%!important; }
+  `
+  document.head.appendChild(s)
+}
+
 // ── Constants ─────────────────────────────────────────────────
 const OSRM_URL       = 'https://router.project-osrm.org/route/v1/driving'
 const NOM_URL        = 'https://nominatim.openstreetmap.org/search'
@@ -201,6 +217,72 @@ function MapController({ pos, follow, zoom }) {
       lastPos.current = pos
     }
   }, [pos, follow])
+  return null
+}
+
+// ── Reactive polyline renderer — handles route + multi-stop segments ──
+// Uses imperative Leaflet so layers update correctly when state changes
+function LivePolylines({ route, stopRoutes }) {
+  const map = useMap()
+  const layerGroupRef = useRef(null)
+
+  useEffect(() => {
+    // Clear old layers
+    if (layerGroupRef.current) {
+      layerGroupRef.current.clearLayers()
+    } else {
+      layerGroupRef.current = L.layerGroup().addTo(map)
+    }
+
+    const lg = layerGroupRef.current
+
+    if (stopRoutes && stopRoutes.length > 0) {
+      // Multi-stop: draw each segment with alternating colour/dash
+      stopRoutes.forEach((seg, i) => {
+        if (!seg || seg.length < 2) return
+        L.polyline(seg, {
+          color:     i === 0 ? '#22d3ee' : '#a78bfa',
+          weight:    6,
+          opacity:   0.92,
+          lineCap:   'round',
+          lineJoin:  'round',
+          dashArray: i === 0 ? null : '10 6',
+        }).addTo(lg)
+        // White inner line for depth on first segment
+        if (i === 0) {
+          L.polyline(seg, {
+            color: '#ffffff',
+            weight: 2,
+            opacity: 0.25,
+            lineCap: 'round',
+          }).addTo(lg)
+        }
+      })
+    } else if (route && route.length > 1) {
+      // Single route
+      L.polyline(route, {
+        color:   '#22d3ee',
+        weight:  6,
+        opacity: 0.92,
+        lineCap: 'round',
+        lineJoin:'round',
+      }).addTo(lg)
+      // White inner highlight
+      L.polyline(route, {
+        color:   '#ffffff',
+        weight:  2,
+        opacity: 0.25,
+        lineCap: 'round',
+      }).addTo(lg)
+    }
+
+    return () => {
+      if (layerGroupRef.current) {
+        layerGroupRef.current.clearLayers()
+      }
+    }
+  }, [map, route, stopRoutes])
+
   return null
 }
 
@@ -559,32 +641,45 @@ function DriverAppMain({ profile, onLogout }) {
   const [isFullscreen, setIsFullscreen] = useState(false)
   const appRef = useRef(null)
 
-  const enterFullscreen = () => {
-    const el = appRef.current || document.documentElement
+  const enterFullscreen = useCallback(async () => {
+    // Try the root app div first, fall back to documentElement
+    const el = appRef.current ?? document.documentElement
     try {
-      if (el.requestFullscreen) el.requestFullscreen()
-      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen()
-      setIsFullscreen(true)
-    } catch {}
-  }
-  const exitFullscreen = () => {
-    try {
-      if (document.exitFullscreen) document.exitFullscreen()
-      else if (document.webkitExitFullscreen) document.webkitExitFullscreen()
-      setIsFullscreen(false)
-    } catch {}
-  }
+      if (el.requestFullscreen)            { await el.requestFullscreen();            return }
+      if (el.webkitRequestFullscreen)      { el.webkitRequestFullscreen();            return }
+      if (el.mozRequestFullScreen)         { el.mozRequestFullScreen();               return }
+      if (el.msRequestFullscreen)          { el.msRequestFullscreen();                return }
+    } catch (e) {
+      console.warn('[FS] enter failed:', e.message)
+    }
+  }, [])
 
+  const exitFullscreen = useCallback(async () => {
+    try {
+      if (document.exitFullscreen)         { await document.exitFullscreen();         return }
+      if (document.webkitExitFullscreen)   { document.webkitExitFullscreen();         return }
+      if (document.mozCancelFullScreen)    { document.mozCancelFullScreen();          return }
+      if (document.msExitFullscreen)       { document.msExitFullscreen();             return }
+    } catch (e) {
+      console.warn('[FS] exit failed:', e.message)
+    }
+  }, [])
+
+  // Sync state with browser fullscreen events (covers hardware back button,
+  // Escape key, or any external fullscreen change)
   useEffect(() => {
-    const handler = () => {
-      setIsFullscreen(!!(document.fullscreenElement || document.webkitFullscreenElement))
+    const sync = () => {
+      const inFS = !!(
+        document.fullscreenElement        ||
+        document.webkitFullscreenElement  ||
+        document.mozFullScreenElement     ||
+        document.msFullscreenElement
+      )
+      setIsFullscreen(inFS)
     }
-    document.addEventListener('fullscreenchange', handler)
-    document.addEventListener('webkitfullscreenchange', handler)
-    return () => {
-      document.removeEventListener('fullscreenchange', handler)
-      document.removeEventListener('webkitfullscreenchange', handler)
-    }
+    const events = ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange']
+    events.forEach(e => document.addEventListener(e, sync))
+    return () => events.forEach(e => document.removeEventListener(e, sync))
   }, [])
 
   // ── Fleet link code state ───────────────────────────────────
@@ -1105,7 +1200,15 @@ function DriverAppMain({ profile, onLogout }) {
 
   // ════════════════════════════════════════════════════════════
   return (
-    <div ref={appRef} className="h-screen w-screen bg-[#060b18] flex flex-col overflow-hidden text-white" style={{ WebkitUserSelect: 'none', userSelect: 'none' }}>
+    <div
+      ref={appRef}
+      className="h-screen w-screen bg-[#060b18] flex flex-col overflow-hidden text-white"
+      style={{
+        WebkitUserSelect: 'none',
+        userSelect: 'none',
+        // Ensure proper sizing in fullscreen on all browsers
+        ...(isFullscreen ? { position: 'fixed', inset: 0, zIndex: 9999, height: '100dvh', width: '100dvw' } : {}),
+      }}>
 
       {/* ── Top Bar ──────────────────────────────────────────── */}
       <div className="flex items-center gap-2 px-3 py-2 bg-[#0d1426] border-b border-violet-500/15 flex-shrink-0">
@@ -1189,22 +1292,41 @@ function DriverAppMain({ profile, onLogout }) {
         </div>
       )}
 
-      {/* ── Tab Bar ──────────────────────────────────────────── */}
-      <div className="flex border-b border-slate-800/60 flex-shrink-0 bg-[#0a1020]">
-        {TABS.map(t => (
-          <button key={t.key}
-            onClick={() => { setTab(t.key); if (t.key === 'chat') setUnread(0) }}
-            className={`flex-1 flex items-center justify-center gap-1 py-2.5 text-2xs font-semibold uppercase tracking-wider transition-colors border-b-2 relative ${
-              tab === t.key ? 'text-violet-400 border-violet-400 bg-violet-500/5' : 'text-slate-600 border-transparent hover:text-slate-400'
-            }`}>
-            <Icon name={t.icon} size={12} />
-            <span>{t.label}</span>
-            {t.badge > 0 && (
-              <span className="absolute top-1.5 right-2 text-2xs bg-red-500 text-white px-1 rounded-full leading-none py-0.5">{t.badge}</span>
-            )}
-          </button>
-        ))}
-      </div>
+      {/* ── Tab Bar — hidden in fullscreen map mode for immersive driving ── */}
+      {!(isFullscreen && tab === 'map') && (
+        <div className="flex border-b border-slate-800/60 flex-shrink-0 bg-[#0a1020]">
+          {TABS.map(t => (
+            <button key={t.key}
+              onClick={() => { setTab(t.key); if (t.key === 'chat') setUnread(0) }}
+              className={`flex-1 flex items-center justify-center gap-1 py-2.5 text-2xs font-semibold uppercase tracking-wider transition-colors border-b-2 relative ${
+                tab === t.key ? 'text-violet-400 border-violet-400 bg-violet-500/5' : 'text-slate-600 border-transparent hover:text-slate-400'
+              }`}>
+              <Icon name={t.icon} size={12} />
+              <span>{t.label}</span>
+              {t.badge > 0 && (
+                <span className="absolute top-1.5 right-2 text-2xs bg-red-500 text-white px-1 rounded-full leading-none py-0.5">{t.badge}</span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+      {/* Fullscreen map: show floating tab switcher strip at bottom */}
+      {isFullscreen && tab === 'map' && (
+        <div className="absolute bottom-0 left-0 right-0 z-[1001] flex border-t border-slate-800/40 bg-[#0a1020]/85 backdrop-blur-sm">
+          {TABS.map(t => (
+            <button key={t.key}
+              onClick={() => { setTab(t.key); if (t.key === 'chat') setUnread(0) }}
+              className={`flex-1 flex items-center justify-center gap-1 py-2 text-2xs font-semibold uppercase tracking-wider transition-colors border-t-2 relative ${
+                tab === t.key ? 'text-violet-400 border-violet-400' : 'text-slate-700 border-transparent'
+              }`}>
+              <Icon name={t.icon} size={11} />
+              {t.badge > 0 && (
+                <span className="absolute top-1 right-2 text-2xs bg-red-500 text-white px-1 rounded-full leading-none py-0.5">{t.badge}</span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* ══════════ MAP TAB ══════════ */}
       {tab === 'map' && (
@@ -1313,21 +1435,8 @@ function DriverAppMain({ profile, onLogout }) {
                 attribution='&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors'
                 url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
               />
-              {/* Route polyline(s) */}
-              {stopRoutes.length > 1
-                ? stopRoutes.map((seg, i) => (
-                    <Polyline key={`seg-${i}`} positions={seg}
-                      pathOptions={{
-                        color: i === 0 ? '#22d3ee' : '#a78bfa',
-                        weight: 5, opacity: 0.9,
-                        dashArray: i === 0 ? undefined : '8 4',
-                      }} />
-                  ))
-                : route && (
-                    <Polyline positions={route}
-                      pathOptions={{ color: '#22d3ee', weight: 5, opacity: 0.9 }} />
-                  )
-              }
+              {/* Reactive polylines — imperative Leaflet for reliable re-rendering */}
+              <LivePolylines route={route} stopRoutes={stopRoutes} />
               {/* 🚛 Driver position — truck follows polyline */}
               <Marker position={pos} icon={DRIVER_ICON} />
               {/* GPS accuracy ring */}
@@ -1364,6 +1473,14 @@ function DriverAppMain({ profile, onLogout }) {
 
           {/* Map overlay controls */}
           <div className="absolute right-3 bottom-28 z-[1000] flex flex-col gap-2">
+            {/* Fullscreen toggle — always visible on the map */}
+            <button
+              onClick={isFullscreen ? exitFullscreen : enterFullscreen}
+              className="w-10 h-10 rounded-xl border shadow-lg flex items-center justify-center transition-colors bg-[#0d1426]/90 border-slate-700 text-slate-400 hover:border-violet-500/40 hover:text-violet-400"
+              title={isFullscreen ? 'Exit fullscreen (Esc)' : 'Fullscreen'}>
+              <Icon name={isFullscreen ? 'Minimize2' : 'Maximize2'} size={16} />
+            </button>
+            {/* Follow toggle */}
             <button onClick={() => setFollow(f => !f)}
               className={`w-10 h-10 rounded-xl border shadow-lg flex items-center justify-center transition-colors ${
                 follow ? 'bg-violet-500/25 border-violet-500/50 text-violet-400' : 'bg-[#0d1426]/90 border-slate-700 text-slate-500'
