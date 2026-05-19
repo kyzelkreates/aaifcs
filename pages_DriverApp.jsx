@@ -4,40 +4,40 @@
  * Route: /driver-app  (no auth guard — driver-side standalone)
  *
  * Features:
- *  ✅ OSM / OSRM full navigation with turn-by-turn
- *  ✅ Live GPS telemetry → fleet dashboard (BroadcastChannel + localStorage)
- *  ✅ Fatigue detection (eye-blink rate, session duration, micro-sleep alerts)
- *  ✅ Harsh-event detection (acceleration, braking, cornering) via DeviceMotion
- *  ✅ Speeding alerts tied to posted-speed-limit estimate
- *  ✅ Apex Sentinel AI — real-time safety coaching via AI abstraction layer
- *  ✅ Apex RouteMind AI — route optimisation & ETA
+ *  ✅ OSM / OSRM navigation — live route, polyline, step-by-step turn guidance
+ *  ✅ Live GPS telemetry push → fleet dashboard (BroadcastChannel + localStorage)
+ *  ✅ Fatigue detection: session timer, behavioural signals (speed variance,
+ *      heading jitter, stop patterns), EU 4.5h break enforcement
+ *  ✅ Harsh-event detection (DeviceMotion: braking, acceleration, cornering)
+ *  ✅ Speeding alerts → safetyService → fleet dashboard
+ *  ✅ Apex Sentinel AI — live safety coaching + proactive alerts
+ *  ✅ Apex RouteMind AI — route optimisation tips on destination set
  *  ✅ Fleet two-way chat (BroadcastChannel + localStorage persistence)
- *  ✅ Driver HUD — speed, heading, accuracy, trip odometer
- *  ✅ Trip timer, distance tracked
- *  ✅ Break reminder (EU driver hours: 45 min after 4.5 h driving)
- *  ✅ Assigned jobs pulled from localStorage dispatch store
- *  ✅ PIN-gated session with per-device profile
- *  ✅ Full-screen map with search (Nominatim geocoding)
+ *  ✅ Trip timer, odometer, heading compass
+ *  ✅ Assigned jobs — pulled from dispatch store, tap to auto-navigate
+ *  ✅ Live step-by-step navigation instructions from OSRM legs
+ *  ✅ PIN-gated session with per-device profile + lockscreen
+ *  ✅ EU driver hours compliance (4h30 continuous driving alert)
+ *  ✅ Break logging — resets session timer + notifies fleet
  * ============================================================
  */
 
-import { useState, useEffect, useRef, useCallback, Suspense, lazy } from 'react'
-import { MapContainer, TileLayer, Marker, Polyline, Circle, useMap, useMapEvents } from 'react-leaflet'
+import { useState, useEffect, useRef, useCallback } from 'react'
+import {
+  MapContainer, TileLayer, Marker, Polyline, Circle, useMap,
+} from 'react-leaflet'
 import L from 'leaflet'
 import Icon from './components_ui_Icon'
-import Badge from './components_ui_Badge'
 import {
   pushTelemetryToFleet,
   sendDriverMessage,
   listenForDriverMessages,
-  sendFleetReply,         // fleet → driver (for AI reply button on dashboard side)
+  sendFleetReply,
 } from './services_sync_driverSyncService'
-import { aiRouter }  from './services_ai_aiRouter'
+import { aiRouter } from './services_ai_aiRouter'
 import { safetyService, ALERT_TYPE, ALERT_SEVERITY } from './services_safety_safetyService'
-import { table } from './services_local_localDB'
-import { formatDateTime } from './utils_format'
 
-// ── Fix default Leaflet icon ──────────────────────────────────
+// ── Fix default Leaflet marker icons ─────────────────────────
 delete L.Icon.Default.prototype._getIconUrl
 L.Icon.Default.mergeOptions({
   iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
@@ -45,216 +45,280 @@ L.Icon.Default.mergeOptions({
   shadowUrl:     'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
 })
 
-// ── Custom map icons ──────────────────────────────────────────
-const mkIcon = (color, glow) => new L.DivIcon({
+// ── Custom SVG icons ──────────────────────────────────────────
+const mkDivIcon = (bg, border, size = 18) => new L.DivIcon({
   className: '',
-  html: `<div style="width:18px;height:18px;background:${color};border:3px solid ${glow};border-radius:50%;box-shadow:0 0 14px ${glow}88;"></div>`,
-  iconSize: [18, 18], iconAnchor: [9, 9],
+  html: `<div style="width:${size}px;height:${size}px;background:${bg};border:3px solid ${border};border-radius:50%;box-shadow:0 0 14px ${border}88;"></div>`,
+  iconSize: [size, size], iconAnchor: [size / 2, size / 2],
 })
-const DRIVER_ICON = mkIcon('#a78bfa', '#7c3aed')
-const DEST_ICON   = mkIcon('#22d3ee', '#0891b2')
+const DRIVER_ICON = mkDivIcon('#a78bfa', '#7c3aed')
+const DEST_ICON   = mkDivIcon('#22d3ee', '#0891b2', 16)
+const WAYPOINT_ICON = mkDivIcon('#f59e0b', '#d97706', 12)
 
 // ── Constants ─────────────────────────────────────────────────
-const OSRM_URL      = 'https://router.project-osrm.org/route/v1/driving'
-const NOM_URL       = 'https://nominatim.openstreetmap.org/search'
-const STORAGE_CREDS = 'apex:local:driver_creds'
-const JOBS_KEY      = 'apex:db:dispatch_jobs'
-const EU_DRIVE_SECS = 4.5 * 3600  // 4h30 before break alert
-const EU_BREAK_SECS = 45 * 60     // 45 min break
+const OSRM_URL       = 'https://router.project-osrm.org/route/v1/driving'
+const NOM_URL        = 'https://nominatim.openstreetmap.org/search'
+const STORAGE_CREDS  = 'apex:local:driver_creds'
+const STORAGE_SESSION= 'apex:driver:session'
+const JOBS_KEY       = 'apex:db:dispatch_jobs'
+const MSGS_KEY       = 'apex:db:driver_messages'
+const EU_DRIVE_SECS  = 4.5 * 3600   // 4h 30m
+const EU_BREAK_SECS  = 45 * 60      // 45 min break required
 
-// ── Helpers ───────────────────────────────────────────────────
-const fmtDist = m => m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${Math.round(m)} m`
-const fmtDur  = s => { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h > 0 ? `${h}h ${m}m` : `${m} min` }
-const fmtTime = s => { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60; return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}` }
-const now     = () => new Date().toISOString()
-const msgKey  = 'apex:db:driver_messages'
+// ── Utility helpers ───────────────────────────────────────────
+const fmtDist  = m  => m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${Math.round(m)} m`
+const fmtDur   = s  => { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h > 0 ? `${h}h ${m}m` : `${m} min` }
+const fmtClock = s  => { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sc = s % 60; return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sc).padStart(2,'0')}` }
+const tsNow    = () => new Date().toISOString()
 
+// ── Haversine distance (m) ────────────────────────────────────
+function haversine([lat1, lng1], [lat2, lng2]) {
+  const R = 6371000, rad = Math.PI / 180
+  const dLat = (lat2 - lat1) * rad, dLng = (lng2 - lng1) * rad
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(dLng / 2) ** 2
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+}
+
+// ── OSRM manoeuvre → human instruction ───────────────────────
+function stepInstruction(step) {
+  if (!step) return ''
+  const { maneuver, name } = step
+  const road = name ? `onto ${name}` : ''
+  const typeMap = {
+    'turn-right':           `Turn right ${road}`,
+    'turn-left':            `Turn left ${road}`,
+    'turn-slight right':    `Bear right ${road}`,
+    'turn-slight left':     `Bear left ${road}`,
+    'turn-sharp right':     `Sharp right ${road}`,
+    'turn-sharp left':      `Sharp left ${road}`,
+    'roundabout':           `At the roundabout, take exit ${maneuver?.exit ?? ''} ${road}`,
+    'rotary':               `At the roundabout, take exit ${maneuver?.exit ?? ''} ${road}`,
+    'straight':             `Continue straight ${road}`,
+    'merge':                `Merge ${road}`,
+    'on ramp':              `Take the on-ramp ${road}`,
+    'off ramp':             `Take the exit ${road}`,
+    'fork':                 `Keep ${maneuver?.modifier ?? 'straight'} at the fork ${road}`,
+    'depart':               `Head ${maneuver?.bearing_after != null ? bearingLabel(maneuver.bearing_after) : ''} ${road}`,
+    'arrive':               `You have arrived at your destination`,
+    'notification':         `Continue ${road}`,
+    'new name':             `Continue onto ${name || ''}`,
+    'end of road':          `Turn ${maneuver?.modifier ?? 'right'} at end of road ${road}`,
+    'continue':             `Continue ${road}`,
+    'use lane':             `Use lane ${road}`,
+  }
+  const key = maneuver ? `${maneuver.type}${maneuver.modifier ? '-' + maneuver.modifier : ''}` : ''
+  const simpleKey = maneuver?.type || ''
+  return typeMap[key] || typeMap[simpleKey] || (name ? `Continue on ${name}` : 'Continue')
+}
+
+function bearingLabel(b) {
+  const dirs = ['north','northeast','east','southeast','south','southwest','west','northwest']
+  return dirs[Math.round(b / 45) % 8]
+}
+
+// ── Manoeuvre → icon name ─────────────────────────────────────
+function stepIcon(step) {
+  const t = step?.maneuver?.type, m = step?.maneuver?.modifier
+  if (t === 'arrive') return 'MapPin'
+  if (t === 'depart') return 'Navigation2'
+  if (t === 'roundabout' || t === 'rotary') return 'RefreshCw'
+  if (m?.includes('right')) return 'CornerDownRight'
+  if (m?.includes('left'))  return 'CornerDownLeft'
+  return 'ArrowUp'
+}
+
+// ── Message persistence ───────────────────────────────────────
 function persistMsg(msg) {
   try {
-    const all = JSON.parse(localStorage.getItem(msgKey) || '[]')
+    const all = JSON.parse(localStorage.getItem(MSGS_KEY) || '[]')
     all.unshift(msg)
-    localStorage.setItem(msgKey, JSON.stringify(all.slice(0, 300)))
+    localStorage.setItem(MSGS_KEY, JSON.stringify(all.slice(0, 300)))
   } catch {}
 }
 function loadMsgs() {
-  try { return JSON.parse(localStorage.getItem(msgKey) || '[]').reverse() } catch { return [] }
+  try { return JSON.parse(localStorage.getItem(MSGS_KEY) || '[]').reverse() } catch { return [] }
 }
 
-// ── MapRecenter ───────────────────────────────────────────────
-function MapRecenter({ pos, zoom, follow }) {
+// ── Load jobs for this driver ─────────────────────────────────
+function loadJobs(driverId) {
+  try {
+    const all = JSON.parse(localStorage.getItem(JOBS_KEY) || '[]')
+    // Show jobs assigned to this driver OR unassigned pending jobs
+    return all.filter(j =>
+      j.driver_id === driverId ||
+      (!j.driver_id && (j.status === 'pending' || j.status === 'assigned'))
+    ).sort((a, b) => {
+      const pri = { urgent: 0, high: 1, normal: 2, low: 3 }
+      return (pri[a.priority] ?? 2) - (pri[b.priority] ?? 2)
+    }).slice(0, 20)
+  } catch { return [] }
+}
+
+// ── Persist job status update back to store ───────────────────
+function updateJobStatus(jobId, status, driverId) {
+  try {
+    const all = JSON.parse(localStorage.getItem(JOBS_KEY) || '[]')
+    const idx = all.findIndex(j => j.id === jobId)
+    if (idx !== -1) {
+      all[idx] = { ...all[idx], status, driver_id: driverId, updated_at: tsNow() }
+      localStorage.setItem(JOBS_KEY, JSON.stringify(all))
+    }
+  } catch {}
+}
+
+// ══════════════════════════════════════════════════════════════
+//  MAP FOLLOW CONTROL
+// ══════════════════════════════════════════════════════════════
+function MapController({ pos, follow, zoom }) {
   const map = useMap()
+  const lastPos = useRef(null)
   useEffect(() => {
-    if (follow && pos) map.setView(pos, zoom ?? map.getZoom(), { animate: true })
+    if (!follow || !pos) return
+    if (!lastPos.current || haversine(lastPos.current, pos) > 5) {
+      map.setView(pos, zoom ?? map.getZoom(), { animate: true, duration: 0.8 })
+      lastPos.current = pos
+    }
   }, [pos, follow])
   return null
 }
 
 // ══════════════════════════════════════════════════════════════
-//  SETUP SCREEN
+//  FATIGUE MONITOR  (behavioural signals + session timer)
 // ══════════════════════════════════════════════════════════════
-function SetupScreen({ onReady }) {
-  const [name,   setName]   = useState('')
-  const [pin,    setPin]    = useState('')
-  const [reg,    setReg]    = useState('')
-  const [err,    setErr]    = useState('')
+function useFatigueMonitor({ enabled, speed, heading, onAlert, profileId }) {
+  // Restore session from localStorage so breaks survive page reload
+  const [sessionSecs,  setSessionSecs]  = useState(() => {
+    try { return parseInt(localStorage.getItem(`${STORAGE_SESSION}:${profileId}`) || '0') } catch { return 0 }
+  })
+  const [fatigueScore, setFatigueScore] = useState(0)
+  const [alertLevel,   setAlertLevel]   = useState('ok')
 
-  const submit = () => {
-    if (!name.trim())   return setErr('Enter your full name')
-    if (pin.length < 4) return setErr('PIN must be at least 4 digits')
-    if (!reg.trim())    return setErr('Enter your vehicle registration')
-    const profile = {
-      id:          `drv-${Date.now()}`,
-      full_name:   name.trim(),
-      pin,
-      vehicle_reg: reg.trim().toUpperCase(),
-      vehicle_id:  `veh-${reg.trim().toLowerCase().replace(/\s/g, '')}`,
-      created_at:  now(),
-    }
-    localStorage.setItem(STORAGE_CREDS, JSON.stringify(profile))
-    onReady(profile)
-  }
-
-  return (
-    <div className="min-h-screen bg-[#060b18] flex flex-col items-center justify-center p-6">
-      <div className="w-full max-w-sm space-y-6">
-        <div className="text-center space-y-2">
-          <div className="w-16 h-16 mx-auto rounded-2xl bg-violet-500/10 border border-violet-500/30 flex items-center justify-center">
-            <Icon name="Navigation" size={28} className="text-violet-400" />
-          </div>
-          <div className="text-2xl font-bold text-white tracking-tight">AP3X Driver</div>
-          <div className="text-sm text-slate-500">Apex Intelligent Fleet Navigation</div>
-        </div>
-        <div className="bg-[#0d1426] border border-violet-500/15 rounded-2xl p-6 space-y-4">
-          {[
-            { label: 'Full Name',            val: name,  set: setName, ph: 'e.g. James Carter',   type: 'text'     },
-            { label: 'Vehicle Registration', val: reg,   set: v => setReg(v.toUpperCase()), ph: 'e.g. AB21 XYZ', type: 'text', mono: true },
-            { label: 'Set PIN (4+ digits)',   val: pin,   set: v => setPin(v.replace(/\D/g,'')), ph: '••••', type: 'password', maxLen: 8 },
-          ].map(({ label, val, set, ph, type, mono, maxLen }) => (
-            <div key={label}>
-              <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">{label}</label>
-              <input value={val} onChange={e => set(e.target.value)} placeholder={ph} type={type}
-                maxLength={maxLen} inputMode={type === 'password' ? 'numeric' : undefined}
-                className={`w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:border-violet-500 focus:outline-none ${mono ? 'font-mono uppercase' : ''}`} />
-            </div>
-          ))}
-          {err && <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{err}</div>}
-          <button onClick={submit} className="w-full bg-violet-500 hover:bg-violet-600 text-white font-semibold rounded-xl py-3 text-sm transition-colors">
-            Start Driving
-          </button>
-        </div>
-        <div className="text-center text-2xs text-slate-700">Powered by OpenStreetMap · OSRM · Apex AI Safety</div>
-      </div>
-    </div>
-  )
-}
-
-// ══════════════════════════════════════════════════════════════
-//  LOGIN SCREEN
-// ══════════════════════════════════════════════════════════════
-function LoginScreen({ profile, onLogin, onReset }) {
-  const [pin, setPin] = useState('')
-  const [err, setErr] = useState('')
-  return (
-    <div className="min-h-screen bg-[#060b18] flex flex-col items-center justify-center p-6">
-      <div className="w-full max-w-xs space-y-6">
-        <div className="text-center">
-          <div className="w-14 h-14 mx-auto rounded-2xl bg-violet-500/10 border border-violet-500/30 flex items-center justify-center mb-3">
-            <Icon name="Navigation" size={24} className="text-violet-400" />
-          </div>
-          <div className="text-xl font-bold text-white">Welcome back</div>
-          <div className="text-sm text-slate-400 mt-1">{profile.full_name}</div>
-          <div className="text-xs text-slate-600 font-mono">{profile.vehicle_reg}</div>
-        </div>
-        <div className="bg-[#0d1426] border border-violet-500/15 rounded-2xl p-5 space-y-4">
-          <input value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, ''))}
-            type="password" inputMode="numeric" maxLength={8} placeholder="Enter PIN"
-            onKeyDown={e => e.key === 'Enter' && (pin === profile.pin ? (setErr(''), onLogin()) : setErr('Incorrect PIN'))}
-            className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:border-violet-500 focus:outline-none text-center tracking-widest" />
-          {err && <div className="text-xs text-red-400 text-center">{err}</div>}
-          <button onClick={() => pin === profile.pin ? (setErr(''), onLogin()) : setErr('Incorrect PIN')}
-            className="w-full bg-violet-500 hover:bg-violet-600 text-white font-semibold rounded-xl py-3 text-sm transition-colors">Unlock</button>
-          <button onClick={onReset} className="w-full text-xs text-slate-600 hover:text-slate-400 py-1">Not you? Reset profile</button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ══════════════════════════════════════════════════════════════
-//  FATIGUE MONITOR  (camera-based blink / session timer)
-// ══════════════════════════════════════════════════════════════
-function useFatigueMonitor({ enabled, onAlert }) {
-  const sessionRef   = useRef(0)       // seconds driven this session
-  const blinksRef    = useRef(0)       // blink count in last 60s window
-  const lastBlinkRef = useRef(Date.now())
-  const timerRef     = useRef(null)
-  const [fatigueScore, setFatigueScore] = useState(0)    // 0-100
-  const [sessionSecs,  setSessionSecs]  = useState(0)
-  const [alertLevel,   setAlertLevel]   = useState('ok') // 'ok'|'warn'|'danger'
+  const sessionRef  = useRef(sessionSecs)
+  const speedHist   = useRef([])   // rolling 60 s window of speed values
+  const headingHist = useRef([])   // rolling 60 s window of heading values
+  const breakAlerted= useRef(false)
 
   useEffect(() => {
     if (!enabled) return
-    timerRef.current = setInterval(() => {
+    const timer = setInterval(() => {
       sessionRef.current += 1
-      setSessionSecs(s => s + 1)
+      setSessionSecs(s => {
+        const ns = s + 1
+        try { localStorage.setItem(`${STORAGE_SESSION}:${profileId}`, String(ns)) } catch {}
+        return ns
+      })
 
-      // EU driver hours: alert at 4.5 h continuous driving
-      if (sessionRef.current === EU_DRIVE_SECS) {
-        onAlert({ type: 'break_due', text: '⚠️ EU regulations: 45-min break required after 4h 30m driving' })
+      // Collect behavioural signals
+      if (speed != null) { speedHist.current.push(speed); if (speedHist.current.length > 60) speedHist.current.shift() }
+      if (heading != null) { headingHist.current.push(heading); if (headingHist.current.length > 60) headingHist.current.shift() }
+
+      // EU break alert (fire once)
+      if (sessionRef.current >= EU_DRIVE_SECS && !breakAlerted.current) {
+        breakAlerted.current = true
+        onAlert({ type: 'break_due', text: '⚠️ EU regulations: 45-min break now required (4h 30m driving reached)' })
       }
 
-      // Simulate fatigue score based on session duration
-      // In production: replace with MediaPipe FaceMesh blink detection
-      const rawScore = Math.min(100, (sessionRef.current / EU_DRIVE_SECS) * 80)
-      setFatigueScore(Math.round(rawScore))
+      // ── Fatigue score calculation (multi-signal) ─────────────
+      // Signal 1: session duration (40% weight) — linear 0→100 over 4.5h
+      const durationScore = Math.min(100, (sessionRef.current / EU_DRIVE_SECS) * 100)
 
-      const level = rawScore > 75 ? 'danger' : rawScore > 45 ? 'warn' : 'ok'
+      // Signal 2: speed variance (30% weight) — high variance = erratic driving
+      let varScore = 0
+      if (speedHist.current.length >= 10) {
+        const mean = speedHist.current.reduce((a, b) => a + b, 0) / speedHist.current.length
+        const variance = speedHist.current.reduce((a, b) => a + (b - mean) ** 2, 0) / speedHist.current.length
+        varScore = Math.min(100, Math.sqrt(variance) * 3) // stddev > 33 → 100
+      }
+
+      // Signal 3: heading instability (30% weight) — weaving indicator
+      let headScore = 0
+      if (headingHist.current.length >= 10) {
+        let totalChange = 0
+        for (let i = 1; i < headingHist.current.length; i++) {
+          let diff = Math.abs(headingHist.current[i] - headingHist.current[i - 1])
+          if (diff > 180) diff = 360 - diff
+          totalChange += diff
+        }
+        const avgChange = totalChange / (headingHist.current.length - 1)
+        headScore = Math.min(100, avgChange * 8) // avg >12.5° per sec → 100
+      }
+
+      const composite = Math.round(
+        durationScore * 0.40 +
+        varScore      * 0.30 +
+        headScore     * 0.30
+      )
+      setFatigueScore(composite)
+
+      const level = composite >= 75 ? 'danger' : composite >= 45 ? 'warn' : 'ok'
       setAlertLevel(level)
 
-      if (rawScore > 75 && sessionRef.current % 300 === 0) {
-        onAlert({ type: 'fatigue_critical', text: '🚨 High fatigue detected — pull over safely and rest immediately' })
-      } else if (rawScore > 45 && sessionRef.current % 600 === 0) {
-        onAlert({ type: 'fatigue_warn', text: '⚠️ Fatigue building — consider taking a break at the next safe opportunity' })
+      // Periodic fatigue alerts (not every tick)
+      if (composite >= 75 && sessionRef.current % 300 === 0) {
+        onAlert({ type: 'fatigue_critical', text: '🚨 Critical fatigue level detected — pull over safely and rest now' })
+      } else if (composite >= 45 && sessionRef.current % 600 === 0) {
+        onAlert({ type: 'fatigue_warn', text: '⚠️ Fatigue building — plan a break at the next safe opportunity' })
       }
     }, 1000)
-    return () => clearInterval(timerRef.current)
-  }, [enabled])
+    return () => clearInterval(timer)
+  }, [enabled, speed, heading])
 
-  const resetSession = () => { sessionRef.current = 0; setSessionSecs(0); setFatigueScore(0); setAlertLevel('ok') }
+  const resetSession = useCallback(() => {
+    sessionRef.current = 0
+    breakAlerted.current = false
+    speedHist.current = []
+    headingHist.current = []
+    setSessionSecs(0)
+    setFatigueScore(0)
+    setAlertLevel('ok')
+    try { localStorage.removeItem(`${STORAGE_SESSION}:${profileId}`) } catch {}
+  }, [profileId])
 
   return { fatigueScore, sessionSecs, alertLevel, resetSession }
 }
 
 // ══════════════════════════════════════════════════════════════
-//  HARSH EVENT DETECTOR  (DeviceMotion)
+//  HARSH EVENT DETECTOR  (DeviceMotion API)
 // ══════════════════════════════════════════════════════════════
 function useHarshEventDetector({ vehicleId, driverId, driverName, vehicleReg, onAlert }) {
   const lastEvt = useRef(0)
 
   useEffect(() => {
-    const THRESHOLD_BRAKE = 8    // m/s² decel
-    const THRESHOLD_ACCEL = 6    // m/s² accel
-    const THRESHOLD_CORN  = 7    // m/s² lateral
+    const BRAKE  = 7.5   // m/s² deceleration
+    const ACCEL  = 5.5   // m/s² acceleration
+    const CORN   = 6.5   // m/s² lateral
 
-    const handler = (e) => {
-      if (!e.acceleration) return
-      const { x, y, z } = e.acceleration
+    const handler = ({ acceleration }) => {
+      if (!acceleration) return
       const now = Date.now()
-      if (now - lastEvt.current < 3000) return  // debounce 3 s
-      const ax = Math.abs(x || 0), ay = Math.abs(y || 0), az = Math.abs(z || 0)
+      if (now - lastEvt.current < 2500) return // 2.5 s debounce
+
+      const ax = Math.abs(acceleration.x || 0)
+      const ay = Math.abs(acceleration.y || 0)
 
       let type = null, text = null, severity = ALERT_SEVERITY.MEDIUM
-      if (ay > THRESHOLD_BRAKE) { type = ALERT_TYPE.HARSH_BRAKE;  text = `Harsh braking detected (${ay.toFixed(1)} m/s²)`;  severity = ay > 12 ? ALERT_SEVERITY.HIGH : ALERT_SEVERITY.MEDIUM }
-      else if (ay > THRESHOLD_ACCEL && ay < THRESHOLD_BRAKE) { type = ALERT_TYPE.HARSH_ACCEL; text = `Harsh acceleration (${ay.toFixed(1)} m/s²)` }
-      else if (ax > THRESHOLD_CORN) { type = 'harsh_cornering'; text = `Harsh cornering detected (${ax.toFixed(1)} m/s²)` }
-      else return
+
+      if (ay >= BRAKE) {
+        type = ALERT_TYPE.HARSH_BRAKE
+        severity = ay >= 11 ? ALERT_SEVERITY.CRITICAL : ay >= 9 ? ALERT_SEVERITY.HIGH : ALERT_SEVERITY.MEDIUM
+        text = `Harsh braking detected — ${ay.toFixed(1)} m/s²`
+      } else if (ay >= ACCEL && ay < BRAKE) {
+        type = ALERT_TYPE.HARSH_ACCEL
+        severity = ALERT_SEVERITY.MEDIUM
+        text = `Harsh acceleration — ${ay.toFixed(1)} m/s²`
+      } else if (ax >= CORN) {
+        type = 'harsh_cornering'
+        severity = ALERT_SEVERITY.MEDIUM
+        text = `Harsh cornering — ${ax.toFixed(1)} m/s²`
+      } else return
 
       lastEvt.current = now
       onAlert({ type: 'harsh_event', text })
 
       try {
         safetyService.createAlert({
-          type, severity, vehicle_id: vehicleId, driver_id: driverId,
+          type, severity,
+          vehicle_id: vehicleId, driver_id: driverId,
           driver_name: driverName, vehicle_reg: vehicleReg,
           description: text, resolved: false,
         })
@@ -267,301 +331,509 @@ function useHarshEventDetector({ vehicleId, driverId, driverName, vehicleReg, on
 }
 
 // ══════════════════════════════════════════════════════════════
+//  SETUP SCREEN
+// ══════════════════════════════════════════════════════════════
+function SetupScreen({ onReady }) {
+  const [name, setName] = useState('')
+  const [pin,  setPin]  = useState('')
+  const [reg,  setReg]  = useState('')
+  const [err,  setErr]  = useState('')
+
+  const submit = () => {
+    if (!name.trim())   return setErr('Enter your full name')
+    if (pin.length < 4) return setErr('PIN must be at least 4 digits')
+    if (!reg.trim())    return setErr('Enter your vehicle registration')
+    const profile = {
+      id:          `drv-${Date.now()}`,
+      full_name:   name.trim(),
+      pin,
+      vehicle_reg: reg.trim().toUpperCase(),
+      vehicle_id:  `veh-${reg.trim().toLowerCase().replace(/\s+/g, '')}`,
+      created_at:  tsNow(),
+    }
+    localStorage.setItem(STORAGE_CREDS, JSON.stringify(profile))
+    onReady(profile)
+  }
+
+  return (
+    <div className="min-h-screen bg-[#060b18] flex items-center justify-center p-6">
+      <div className="w-full max-w-sm space-y-6">
+        <div className="text-center space-y-2">
+          <div className="w-16 h-16 mx-auto rounded-2xl bg-violet-500/10 border border-violet-500/30 flex items-center justify-center">
+            <Icon name="Navigation" size={28} className="text-violet-400" />
+          </div>
+          <div className="text-2xl font-bold text-white tracking-tight">AP3X Driver</div>
+          <div className="text-sm text-slate-500">Apex Intelligent Fleet Navigation</div>
+        </div>
+
+        <div className="bg-[#0d1426] border border-violet-500/15 rounded-2xl p-6 space-y-4">
+          <div>
+            <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">Full Name</label>
+            <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. James Carter"
+              className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:border-violet-500 focus:outline-none" />
+          </div>
+          <div>
+            <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">Vehicle Registration</label>
+            <input value={reg} onChange={e => setReg(e.target.value.toUpperCase())} placeholder="e.g. AB21 XYZ"
+              className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:border-violet-500 focus:outline-none font-mono" />
+          </div>
+          <div>
+            <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">Set PIN (4+ digits)</label>
+            <input value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, ''))} type="password"
+              inputMode="numeric" maxLength={8} placeholder="••••"
+              className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:border-violet-500 focus:outline-none" />
+          </div>
+          {err && <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{err}</div>}
+          <button onClick={submit}
+            className="w-full bg-violet-500 hover:bg-violet-600 text-white font-semibold rounded-xl py-3 text-sm transition-colors">
+            Start Driving
+          </button>
+        </div>
+        <p className="text-center text-2xs text-slate-700">Powered by OpenStreetMap · OSRM · Apex AI Safety</p>
+      </div>
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════
+//  LOGIN SCREEN
+// ══════════════════════════════════════════════════════════════
+function LoginScreen({ profile, onLogin, onReset }) {
+  const [pin, setPin] = useState('')
+  const [err, setErr] = useState('')
+
+  const attempt = () => {
+    if (pin === profile.pin) { setErr(''); onLogin() }
+    else setErr('Incorrect PIN — try again')
+  }
+
+  return (
+    <div className="min-h-screen bg-[#060b18] flex items-center justify-center p-6">
+      <div className="w-full max-w-xs space-y-6">
+        <div className="text-center">
+          <div className="w-14 h-14 mx-auto rounded-2xl bg-violet-500/10 border border-violet-500/30 flex items-center justify-center mb-3">
+            <Icon name="Navigation" size={24} className="text-violet-400" />
+          </div>
+          <div className="text-xl font-bold text-white">Welcome back</div>
+          <div className="text-sm text-slate-400 mt-1">{profile.full_name}</div>
+          <div className="text-xs text-slate-600 font-mono">{profile.vehicle_reg}</div>
+        </div>
+        <div className="bg-[#0d1426] border border-violet-500/15 rounded-2xl p-5 space-y-4">
+          <input value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, ''))}
+            type="password" inputMode="numeric" maxLength={8} placeholder="Enter PIN"
+            onKeyDown={e => e.key === 'Enter' && attempt()}
+            className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:border-violet-500 focus:outline-none text-center tracking-widest" />
+          {err && <div className="text-xs text-red-400 text-center">{err}</div>}
+          <button onClick={attempt}
+            className="w-full bg-violet-500 hover:bg-violet-600 text-white font-semibold rounded-xl py-3 text-sm transition-colors">
+            Unlock
+          </button>
+          <button onClick={onReset} className="w-full text-xs text-slate-600 hover:text-slate-400 py-1">
+            Not you? Reset profile
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════
 //  MAIN DRIVER APP
 // ══════════════════════════════════════════════════════════════
 function DriverAppMain({ profile, onLogout }) {
-  const [tab, setTab]           = useState('map')  // 'map'|'safety'|'chat'|'jobs'
-  const [pos, setPos]           = useState(null)
-  const [speed, setSpeed]       = useState(0)
-  const [heading, setHeading]   = useState(0)
+
+  // ── GPS state ────────────────────────────────────────────────
+  const [pos,      setPos]      = useState(null)
+  const [speed,    setSpeed]    = useState(0)
+  const [heading,  setHeading]  = useState(null)
   const [accuracy, setAccuracy] = useState(null)
-  const [gpsOk, setGpsOk]       = useState('waiting')
-  const [follow, setFollow]     = useState(true)
+  const [gpsState, setGpsState] = useState('waiting') // 'waiting'|'active'|'denied'
   const [tripDist, setTripDist] = useState(0)
-  const prevPosRef               = useRef(null)
+  const prevPosRef = useRef(null)
 
-  // Route / nav
-  const [destination, setDest]   = useState(null)
-  const [destName, setDestName]  = useState('')
-  const [route, setRoute]         = useState(null)
-  const [routeInfo, setRouteInfo] = useState(null)
-  const [routing, setRouting]     = useState(false)
-  const [showSearch, setShowSearch] = useState(false)
-  const [searchQ, setSearchQ]     = useState('')
-  const [searchRes, setSearchRes] = useState([])
-  const [searching, setSearching] = useState(false)
-  const [nextStep, setNextStep]   = useState(null)
+  // ── Navigation state ─────────────────────────────────────────
+  const [destination,  setDest]       = useState(null)
+  const [destName,     setDestName]   = useState('')
+  const [route,        setRoute]      = useState(null)      // [[lat,lng],...]
+  const [routeInfo,    setRouteInfo]  = useState(null)      // {distance, duration}
+  const [routeSteps,   setRouteSteps] = useState([])        // OSRM step objects
+  const [stepIdx,      setStepIdx]    = useState(0)
+  const [routing,      setRouting]    = useState(false)
+  const [follow,       setFollow]     = useState(true)
+  const [showSearch,   setShowSearch] = useState(false)
+  const [searchQ,      setSearchQ]    = useState('')
+  const [searchRes,    setSearchRes]  = useState([])
+  const [searching,    setSearching]  = useState(false)
 
-  // Chat
-  const [messages, setMessages] = useState(loadMsgs)
-  const [chatInput, setChatInput] = useState('')
-  const [unreadFleet, setUnreadFleet] = useState(0)
+  // ── UI tabs ───────────────────────────────────────────────────
+  const [tab, setTab] = useState('map') // 'map'|'safety'|'chat'|'jobs'
+
+  // ── Chat state ───────────────────────────────────────────────
+  const [messages,    setMessages]   = useState(loadMsgs)
+  const [chatInput,   setChatInput]  = useState('')
+  const [unread,      setUnread]     = useState(0)
   const chatEndRef = useRef(null)
 
-  // Safety / AI
-  const [safetyAlerts, setSafetyAlerts]   = useState([])
-  const [sentinelChat, setSentinelChat]   = useState([])
-  const [sentinelInput, setSentinelInput] = useState('')
-  const [sentinelBusy, setSentinelBusy]   = useState(false)
-  const [activeAlert, setActiveAlert]     = useState(null) // banner
-  const alertTimer = useRef(null)
+  // ── Safety / AI state ────────────────────────────────────────
+  const [safetyAlerts, setSafetyAlerts]  = useState([])
+  const [activeAlert,  setActiveAlert]   = useState(null)
+  const [sentinelLog,  setSentinelLog]   = useState([])
+  const [sentinelQ,    setSentinelQ]     = useState('')
+  const [sentinelBusy, setSentinelBusy]  = useState(false)
+  const alertTimerRef = useRef(null)
 
-  // Jobs
-  const [jobs, setJobs] = useState(() => {
-    try { return (JSON.parse(localStorage.getItem(JOBS_KEY) || '[]')).filter(j => j.driver_id === profile.id || !j.driver_id).slice(0, 10) }
-    catch { return [] }
-  })
-  const [activeJob, setActiveJob] = useState(null)
+  // ── Jobs state ───────────────────────────────────────────────
+  const [jobs,       setJobs]      = useState(() => loadJobs(profile.id))
+  const [activeJob,  setActiveJob] = useState(null)
 
   // ── GPS watch ────────────────────────────────────────────────
   useEffect(() => {
-    if (!navigator.geolocation) { setGpsOk('denied'); return }
+    if (!navigator.geolocation) { setGpsState('denied'); return }
     const wid = navigator.geolocation.watchPosition(
       ({ coords }) => {
-        const { latitude: lat, longitude: lng, heading, speed, accuracy } = coords
+        const { latitude: lat, longitude: lng, heading: h, speed: spd, accuracy: acc } = coords
         const p = [lat, lng]
         setPos(p)
-        setHeading(Math.round(heading || 0))
-        setSpeed(speed ? Math.round(speed * 3.6) : 0)
-        setAccuracy(Math.round(accuracy))
-        setGpsOk('active')
-        // trip odometer
-        if (prevPosRef.current) {
-          const d = haversine(prevPosRef.current, p)
-          setTripDist(prev => prev + d)
-        }
+        setHeading(Math.round(h ?? 0))
+        setSpeed(spd != null ? Math.round(spd * 3.6) : 0)
+        setAccuracy(Math.round(acc ?? 0))
+        setGpsState('active')
+
+        // Trip odometer
+        if (prevPosRef.current) setTripDist(d => d + haversine(prevPosRef.current, p))
         prevPosRef.current = p
-        // speeding check
-        if (speed && speed * 3.6 > 90) {
-          triggerAlert({ type: 'speeding', text: `⚠️ Speed: ${Math.round(speed * 3.6)} km/h — reduce speed` })
-          try {
-            safetyService.evaluateTelemetry({
-              speed: Math.round(speed * 3.6), driver_id: profile.id, vehicle_id: profile.vehicle_id,
-              driver_name: profile.full_name, vehicle_reg: profile.vehicle_reg,
-            })
-          } catch {}
+
+        // Step advancement — check if within 30 m of next waypoint
+        if (route && routeSteps.length > 0) {
+          const next = routeSteps[stepIdx]
+          if (next?.maneuver?.location) {
+            const [lng2, lat2] = next.maneuver.location
+            if (haversine(p, [lat2, lng2]) < 30) {
+              setStepIdx(i => Math.min(i + 1, routeSteps.length - 1))
+            }
+          }
+        }
+
+        // Speeding alert
+        const kmh = spd != null ? spd * 3.6 : 0
+        if (kmh > 90) {
+          fireSafetyAlert({
+            type: ALERT_TYPE.SPEEDING, text: `⚠️ Speed: ${Math.round(kmh)} km/h — reduce speed`,
+            severity: kmh > 110 ? ALERT_SEVERITY.CRITICAL : ALERT_SEVERITY.HIGH,
+          })
         }
       },
-      () => setGpsOk('denied'),
-      { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 }
+      () => setGpsState('denied'),
+      { enableHighAccuracy: true, maximumAge: 2000, timeout: 20000 }
     )
     return () => navigator.geolocation.clearWatch(wid)
-  }, [])
+  }, [route, routeSteps, stepIdx])
 
-  // ── Push telemetry every 5 s ─────────────────────────────────
+  // ── Telemetry push every 5 s ──────────────────────────────────
   useEffect(() => {
-    const timer = setInterval(() => {
+    const t = setInterval(() => {
       if (!pos) return
       const pkg = {
         driver_id: profile.id, driver_name: profile.full_name,
         vehicle_id: profile.vehicle_id, vehicle_reg: profile.vehicle_reg,
         lat: pos[0], lng: pos[1], speed, heading, accuracy,
-        trip_dist_m: Math.round(tripDist), ts: now(),
+        trip_dist_m: Math.round(tripDist),
+        destination: destName || null,
+        ts: tsNow(),
       }
       try { pushTelemetryToFleet(profile.id, pkg) } catch {}
       try { localStorage.setItem(`apex:tel:${profile.vehicle_id}`, JSON.stringify(pkg)) } catch {}
     }, 5000)
-    return () => clearInterval(timer)
-  }, [pos, speed, heading, accuracy, tripDist, profile])
+    return () => clearInterval(t)
+  }, [pos, speed, heading, accuracy, tripDist, destName, profile])
 
-  // ── Fleet chat listener ──────────────────────────────────────
+  // ── Fleet chat listener ───────────────────────────────────────
   useEffect(() => {
     const unsub = listenForDriverMessages(msg => {
       if (msg.from === 'fleet' || msg.from === 'ai') {
         setMessages(prev => [...prev, msg])
-        setUnreadFleet(u => u + 1)
-        setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 60)
+        setUnread(u => u + 1)
+        setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 80)
       }
     })
     return unsub
   }, [])
 
-  // ── Fatigue monitor ──────────────────────────────────────────
+  // ── Refresh jobs when localStorage changes ────────────────────
+  useEffect(() => {
+    const onStorage = () => setJobs(loadJobs(profile.id))
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [profile.id])
+
+  // ── Fatigue monitor ───────────────────────────────────────────
   const { fatigueScore, sessionSecs, alertLevel, resetSession } = useFatigueMonitor({
-    enabled: gpsOk === 'active',
-    onAlert: a => triggerAlert(a),
+    enabled:   gpsState === 'active',
+    speed,
+    heading,
+    onAlert:   a => fireSafetyAlert(a),
+    profileId: profile.id,
   })
 
-  // ── Harsh event detector ─────────────────────────────────────
+  // ── Harsh event detector ──────────────────────────────────────
   useHarshEventDetector({
-    vehicleId:   profile.vehicle_id,
-    driverId:    profile.id,
-    driverName:  profile.full_name,
-    vehicleReg:  profile.vehicle_reg,
-    onAlert:     a => triggerAlert(a),
+    vehicleId:  profile.vehicle_id,
+    driverId:   profile.id,
+    driverName: profile.full_name,
+    vehicleReg: profile.vehicle_reg,
+    onAlert:    a => fireSafetyAlert(a),
   })
 
-  // ── Alert banner helper ──────────────────────────────────────
-  const triggerAlert = useCallback((a) => {
+  // ── Safety alert helper ───────────────────────────────────────
+  const fireSafetyAlert = useCallback((a) => {
     setActiveAlert(a)
-    setSafetyAlerts(prev => [{ ...a, id: Date.now(), ts: now() }, ...prev].slice(0, 50))
-    clearTimeout(alertTimer.current)
-    alertTimer.current = setTimeout(() => setActiveAlert(null), 8000)
-  }, [])
+    setSafetyAlerts(prev => [{ ...a, id: Date.now(), ts: tsNow() }, ...prev].slice(0, 60))
+    clearTimeout(alertTimerRef.current)
+    alertTimerRef.current = setTimeout(() => setActiveAlert(null), 9000)
 
-  // ── OSRM routing ─────────────────────────────────────────────
+    // Log speeding to safetyService so fleet sees it
+    if (a.type === ALERT_TYPE.SPEEDING || a.type === ALERT_TYPE.HARSH_BRAKE) {
+      try {
+        safetyService.createAlert({
+          type: a.type, severity: a.severity ?? ALERT_SEVERITY.MEDIUM,
+          vehicle_id: profile.vehicle_id, driver_id: profile.id,
+          driver_name: profile.full_name, vehicle_reg: profile.vehicle_reg,
+          description: a.text, resolved: false,
+        })
+      } catch {}
+    }
+  }, [profile])
+
+  // ── OSRM routing ──────────────────────────────────────────────
   const fetchRoute = useCallback(async (from, to) => {
-    setRouting(true); setRoute(null); setRouteInfo(null)
+    setRouting(true); setRoute(null); setRouteInfo(null); setRouteSteps([]); setStepIdx(0)
     try {
-      const url = `${OSRM_URL}/${from[1]},${from[0]};${to[1]},${to[0]}?overview=full&geometries=geojson&steps=true`
-      const d   = await fetch(url).then(r => r.json())
-      if (d.code === 'Ok' && d.routes[0]) {
-        const r   = d.routes[0]
+      const url = `${OSRM_URL}/${from[1]},${from[0]};${to[1]},${to[0]}?overview=full&geometries=geojson&steps=true&annotations=false`
+      const data = await fetch(url).then(r => r.json())
+      if (data.code === 'Ok' && data.routes[0]) {
+        const r      = data.routes[0]
         const coords = r.geometry.coordinates.map(([lng, lat]) => [lat, lng])
+        const steps  = r.legs.flatMap(leg => leg.steps || [])
         setRoute(coords)
         setRouteInfo({ distance: r.distance, duration: r.duration })
-        // First step instruction
-        const step = r.legs[0]?.steps[0]
-        if (step) setNextStep(step.maneuver?.instruction || step.name || '')
-        // Ask RouteMind for optimisation tips
-        routeMindTip(to)
+        setRouteSteps(steps)
+        setStepIdx(0)
+        // RouteMind AI tip (non-blocking)
+        askRouteMind(to)
       }
     } catch (e) { console.error('[OSRM]', e) }
     setRouting(false)
   }, [])
 
-  const selectDest = (result) => {
-    const to = [parseFloat(result.lat), parseFloat(result.lon)]
-    setDest(to)
-    setDestName(result.display_name.split(',').slice(0, 2).join(', '))
-    setSearchRes([]); setShowSearch(false); setSearchQ('')
-    if (pos) fetchRoute(pos, to)
-  }
-
-  const clearRoute = () => { setDest(null); setDestName(''); setRoute(null); setRouteInfo(null); setNextStep(null) }
-
-  // ── Nominatim search ─────────────────────────────────────────
+  // ── Geocode & select destination ──────────────────────────────
   const doSearch = useCallback(async () => {
     if (!searchQ.trim()) return
     setSearching(true); setSearchRes([])
     try {
-      const r = await fetch(`${NOM_URL}?q=${encodeURIComponent(searchQ)}&format=json&limit=6`, {
-        headers: { 'Accept-Language': 'en', 'User-Agent': 'ApexAI/1.0' }
+      const r = await fetch(`${NOM_URL}?q=${encodeURIComponent(searchQ)}&format=json&limit=6&countrycodes=gb,ie,fr,de,nl,be,es,it`, {
+        headers: { 'Accept-Language': 'en', 'User-Agent': 'ApexAI-DriverApp/1.0' }
       })
       setSearchRes(await r.json())
     } catch {}
     setSearching(false)
   }, [searchQ])
 
-  // ── Haversine ────────────────────────────────────────────────
-  function haversine([lat1, lng1], [lat2, lng2]) {
-    const R = 6371000, dLat = (lat2 - lat1) * Math.PI / 180, dLng = (lng2 - lng1) * Math.PI / 180
-    const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)**2
-    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a))
+  const selectDest = useCallback((result) => {
+    const to = [parseFloat(result.lat), parseFloat(result.lon)]
+    setDest(to)
+    setDestName(result.display_name.split(',').slice(0, 2).join(', '))
+    setSearchRes([]); setShowSearch(false); setSearchQ('')
+    if (pos) fetchRoute(pos, to)
+  }, [pos, fetchRoute])
+
+  const clearRoute = () => {
+    setDest(null); setDestName(''); setRoute(null); setRouteInfo(null); setRouteSteps([]); setStepIdx(0)
   }
 
-  // ── RouteMind AI tip ─────────────────────────────────────────
-  const routeMindTip = async (dest) => {
+  // ── RouteMind AI tip on new destination ──────────────────────
+  const askRouteMind = async (destCoords) => {
     try {
-      const ctx = `Driver: ${profile.full_name}, Vehicle: ${profile.vehicle_reg}, Current pos: ${pos?.join(',')}, Destination: ${destName || dest?.join(',')}`
-      const res = await aiRouter.routeModule('apex_routemind', `Give a brief 2-sentence route efficiency tip for this journey. ${ctx}`)
-      setSentinelChat(prev => [...prev, { role: 'assistant', module: 'routemind', text: res?.content || res, ts: now() }])
+      const msg = `I'm driving to ${destName || destCoords?.join(',')}. Current position: ${pos?.join(',')}. Give me a 1-sentence efficient route tip.`
+      const res = await aiRouter.routeModule('apex_routemind', msg)
+      const tip = res?.content || res
+      if (tip) {
+        setSentinelLog(prev => [...prev, {
+          role: 'assistant', module: 'routemind',
+          text: `🧭 RouteMind: ${tip}`, ts: tsNow(),
+        }])
+      }
     } catch {}
   }
 
-  // ── Sentinel AI query ────────────────────────────────────────
-  const askSentinel = async (text) => {
-    if (!text.trim() || sentinelBusy) return
+  // ── Sentinel AI query ─────────────────────────────────────────
+  const askSentinel = async (question) => {
+    if (!question.trim() || sentinelBusy) return
     setSentinelBusy(true)
-    setSentinelChat(prev => [...prev, { role: 'user', text, ts: now() }])
-    setSentinelInput('')
+    setSentinelLog(prev => [...prev, { role: 'user', text: question, ts: tsNow() }])
+    setSentinelQ('')
     try {
-      const ctx = `Driver: ${profile.full_name}, Session: ${fmtTime(sessionSecs)}, Fatigue score: ${fatigueScore}/100, Speed: ${speed} km/h, Trip: ${fmtDist(tripDist)}, Alerts: ${safetyAlerts.slice(0,3).map(a=>a.text).join('; ')}`
-      const res = await aiRouter.routeModule('apex_sentinel', `${text}\n\nContext: ${ctx}`)
-      const reply = typeof res === 'string' ? res : res?.content || res?.choices?.[0]?.message?.content || 'No response'
-      setSentinelChat(prev => [...prev, { role: 'assistant', module: 'sentinel', text: reply, ts: now() }])
-    } catch (e) {
-      setSentinelChat(prev => [...prev, { role: 'assistant', module: 'sentinel', text: 'Sentinel offline — check AI provider settings.', ts: now() }])
+      const ctx = [
+        `Driver: ${profile.full_name}`,
+        `Vehicle: ${profile.vehicle_reg}`,
+        `Session time: ${fmtClock(sessionSecs)}`,
+        `Fatigue score: ${fatigueScore}/100 (${alertLevel})`,
+        `Speed: ${speed} km/h`,
+        `Trip distance: ${fmtDist(tripDist)}`,
+        `Recent alerts: ${safetyAlerts.slice(0, 3).map(a => a.text).join('; ') || 'none'}`,
+      ].join(', ')
+
+      const res   = await aiRouter.routeModule('apex_sentinel', `${question}\n\nDriver context: ${ctx}`)
+      const reply = res?.content || (typeof res === 'string' ? res : 'No response from Sentinel')
+      setSentinelLog(prev => [...prev, { role: 'assistant', module: 'sentinel', text: reply, ts: tsNow() }])
+    } catch {
+      setSentinelLog(prev => [...prev, {
+        role: 'assistant', module: 'sentinel',
+        text: 'Sentinel is offline — check your AI provider keys in Settings.',
+        ts: tsNow(),
+      }])
     }
     setSentinelBusy(false)
   }
 
-  // ── Fleet chat send ──────────────────────────────────────────
-  const sendChat = () => {
+  // ── Fleet chat send ───────────────────────────────────────────
+  const sendChat = useCallback(() => {
     if (!chatInput.trim()) return
-    const msg = sendDriverMessage(profile.id, profile.full_name, profile.vehicle_id, profile.vehicle_reg, chatInput.trim())
+    const msg = sendDriverMessage(
+      profile.id, profile.full_name,
+      profile.vehicle_id, profile.vehicle_reg,
+      chatInput.trim()
+    )
     persistMsg(msg)
     setMessages(prev => [...prev, msg])
     setChatInput('')
-    setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 60)
-  }
+    setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 80)
+  }, [chatInput, profile])
 
-  // ── Fatigue colour ────────────────────────────────────────────
+  // ── Job: navigate ────────────────────────────────────────────
+  const navigateToJob = useCallback(async (job) => {
+    setActiveJob(job)
+    updateJobStatus(job.id, 'in_progress', profile.id)
+    setTab('map')
+
+    const addr = job.destination || job.dropoff_address || job.address || ''
+    if (!addr) return
+
+    // Geocode the job address
+    try {
+      const r = await fetch(`${NOM_URL}?q=${encodeURIComponent(addr)}&format=json&limit=1`, {
+        headers: { 'Accept-Language': 'en', 'User-Agent': 'ApexAI-DriverApp/1.0' }
+      })
+      const [result] = await r.json()
+      if (result && pos) {
+        const to = [parseFloat(result.lat), parseFloat(result.lon)]
+        setDest(to)
+        setDestName(addr)
+        fetchRoute(pos, to)
+      }
+    } catch {}
+  }, [pos, fetchRoute, profile.id])
+
+  const completeJob = useCallback((job) => {
+    updateJobStatus(job.id, 'completed', profile.id)
+    setJobs(prev => prev.filter(j => j.id !== job.id))
+    if (activeJob?.id === job.id) {
+      setActiveJob(null)
+      clearRoute()
+    }
+    // Notify fleet
+    try {
+      sendFleetReply(profile.id, `Job completed: ${job.title}`, false)
+    } catch {}
+  }, [activeJob, profile.id])
+
+  // ── Computed ──────────────────────────────────────────────────
   const fatigueColor = alertLevel === 'danger' ? 'text-red-400' : alertLevel === 'warn' ? 'text-amber-400' : 'text-emerald-400'
-  const fatigueBg    = alertLevel === 'danger' ? 'bg-red-500/10 border-red-500/30' : alertLevel === 'warn' ? 'bg-amber-500/10 border-amber-500/30' : 'bg-emerald-500/10 border-emerald-500/30'
+  const fatigueBorder= alertLevel === 'danger' ? 'border-red-500/30 bg-red-500/8' : alertLevel === 'warn' ? 'border-amber-500/30 bg-amber-500/8' : 'border-emerald-500/20 bg-emerald-500/5'
+  const currentStep  = routeSteps[stepIdx]
+  const distToNext   = currentStep?.distance ? fmtDist(currentStep.distance) : null
 
-  // ── Tabs ──────────────────────────────────────────────────────
   const TABS = [
     { key: 'map',    label: 'Nav',    icon: 'Map'           },
     { key: 'safety', label: 'Safety', icon: 'Shield'        },
-    { key: 'chat',   label: 'Fleet',  icon: 'MessageSquare', badge: unreadFleet },
-    { key: 'jobs',   label: 'Jobs',   icon: 'Package'        },
+    { key: 'chat',   label: 'Fleet',  icon: 'MessageSquare', badge: unread },
+    { key: 'jobs',   label: 'Jobs',   icon: 'Package',       badge: jobs.filter(j=>j.status==='pending'||!j.status).length },
   ]
 
+  // ════════════════════════════════════════════════════════════
   return (
-    <div className="h-screen w-screen bg-[#060b18] flex flex-col overflow-hidden text-white select-none">
+    <div className="h-screen w-screen bg-[#060b18] flex flex-col overflow-hidden text-white" style={{ WebkitUserSelect: 'none', userSelect: 'none' }}>
 
       {/* ── Top Bar ──────────────────────────────────────────── */}
-      <div className="flex items-center justify-between px-4 py-2 bg-[#0d1426] border-b border-violet-500/15 flex-shrink-0">
-        <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 px-3 py-2 bg-[#0d1426] border-b border-violet-500/15 flex-shrink-0">
+        {/* Logo + vehicle */}
+        <div className="flex items-center gap-2 flex-shrink-0">
           <div className="w-7 h-7 rounded-lg bg-violet-500/15 border border-violet-500/25 flex items-center justify-center">
             <Icon name="Navigation" size={13} className="text-violet-400" />
           </div>
           <div>
-            <div className="text-xs font-bold text-white leading-none">AP3X</div>
+            <div className="text-xs font-bold leading-none text-white">AP3X</div>
             <div className="text-2xs text-slate-600 font-mono leading-none">{profile.vehicle_reg}</div>
           </div>
         </div>
 
-        {/* Speed + GPS pill */}
-        <div className="flex items-center gap-2">
-          <div className={`flex items-center gap-1.5 px-2 py-1 rounded-full border text-2xs font-mono ${
-            speed > 80 ? 'border-red-500/30 bg-red-500/10 text-red-400' :
-            speed > 60 ? 'border-amber-500/30 bg-amber-500/10 text-amber-400' :
-            'border-slate-700 bg-slate-900/50 text-white'
-          }`}>
-            <span className="tabular-nums font-bold text-sm">{speed}</span>
-            <span className="text-slate-600">km/h</span>
-          </div>
-          <div className={`w-2 h-2 rounded-full ${gpsOk === 'active' ? 'bg-emerald-400 animate-pulse' : gpsOk === 'denied' ? 'bg-red-400' : 'bg-amber-400'}`} />
+        <div className="flex-1" />
+
+        {/* Speed pill */}
+        <div className={`flex items-center gap-1 px-2 py-1 rounded-lg border text-xs font-mono tabular-nums ${
+          speed > 90 ? 'border-red-500/40 bg-red-500/10 text-red-400' :
+          speed > 70 ? 'border-amber-500/40 bg-amber-500/10 text-amber-400' :
+          'border-slate-700/60 bg-slate-900/50 text-white'
+        }`}>
+          <span className="text-base font-bold">{speed}</span>
+          <span className="text-slate-600 text-2xs">km/h</span>
         </div>
 
         {/* Fatigue badge */}
-        <div className={`flex items-center gap-1.5 px-2 py-1 rounded-full border text-2xs ${fatigueBg}`}>
+        <div className={`flex items-center gap-1 px-2 py-1 rounded-lg border text-2xs ${fatigueBorder}`}>
           <Icon name="Eye" size={10} className={fatigueColor} />
-          <span className={fatigueColor}>{fatigueScore}%</span>
+          <span className={`font-mono font-semibold ${fatigueColor}`}>{fatigueScore}%</span>
         </div>
 
+        {/* GPS dot */}
+        <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
+          gpsState === 'active' ? 'bg-emerald-400 animate-pulse' :
+          gpsState === 'denied' ? 'bg-red-400' : 'bg-amber-400'
+        }`} />
+
+        {/* Logout */}
         <button onClick={onLogout} className="text-slate-700 hover:text-slate-400 transition-colors ml-1">
           <Icon name="LogOut" size={14} />
         </button>
       </div>
 
-      {/* ── Active Alert Banner ───────────────────────────────── */}
+      {/* ── Alert Banner ─────────────────────────────────────── */}
       {activeAlert && (
-        <div className={`flex items-center gap-2 px-4 py-2.5 flex-shrink-0 text-xs font-medium ${
-          activeAlert.type?.includes('critical') || activeAlert.type === 'fatigue_critical'
-            ? 'bg-red-500/15 border-b border-red-500/30 text-red-300'
-            : 'bg-amber-500/10 border-b border-amber-500/25 text-amber-300'
+        <div className={`flex items-center gap-2 px-4 py-2.5 flex-shrink-0 text-xs font-medium animate-pulse-once ${
+          activeAlert.type === 'fatigue_critical' || activeAlert.type === ALERT_TYPE.SPEEDING
+            ? 'bg-red-500/15 border-b border-red-500/30 text-red-200'
+            : 'bg-amber-500/10 border-b border-amber-500/25 text-amber-200'
         }`}>
           <Icon name="AlertTriangle" size={13} className="flex-shrink-0" />
-          <span className="flex-1">{activeAlert.text}</span>
-          <button onClick={() => setActiveAlert(null)} className="text-slate-500 hover:text-slate-300">
+          <span className="flex-1 text-xs">{activeAlert.text}</span>
+          <button onClick={() => setActiveAlert(null)} className="text-slate-500 hover:text-white">
             <Icon name="X" size={12} />
           </button>
         </div>
       )}
 
       {/* ── Tab Bar ──────────────────────────────────────────── */}
-      <div className="flex border-b border-slate-800/50 flex-shrink-0 bg-[#0a1020]">
+      <div className="flex border-b border-slate-800/60 flex-shrink-0 bg-[#0a1020]">
         {TABS.map(t => (
-          <button key={t.key} onClick={() => { setTab(t.key); if (t.key === 'chat') setUnreadFleet(0) }}
-            className={`flex-1 flex items-center justify-center gap-1 py-2.5 text-2xs font-semibold uppercase tracking-wider transition-colors border-b-2 ${
+          <button key={t.key}
+            onClick={() => { setTab(t.key); if (t.key === 'chat') setUnread(0) }}
+            className={`flex-1 flex items-center justify-center gap-1 py-2.5 text-2xs font-semibold uppercase tracking-wider transition-colors border-b-2 relative ${
               tab === t.key ? 'text-violet-400 border-violet-400 bg-violet-500/5' : 'text-slate-600 border-transparent hover:text-slate-400'
             }`}>
-            <Icon name={t.icon} size={13} />
-            {t.label}
-            {t.badge > 0 && <span className="text-2xs bg-violet-500/30 text-violet-300 px-1 rounded-full">{t.badge}</span>}
+            <Icon name={t.icon} size={12} />
+            <span>{t.label}</span>
+            {t.badge > 0 && (
+              <span className="absolute top-1.5 right-2 text-2xs bg-red-500 text-white px-1 rounded-full leading-none py-0.5">{t.badge}</span>
+            )}
           </button>
         ))}
       </div>
@@ -570,118 +842,158 @@ function DriverAppMain({ profile, onLogout }) {
       {tab === 'map' && (
         <div className="flex-1 relative overflow-hidden">
 
-          {/* Search overlay */}
-          <div className="absolute top-2 left-2 right-2 z-[1000]">
-            {showSearch ? (
-              <div className="bg-[#0d1426]/98 backdrop-blur border border-violet-500/25 rounded-xl shadow-xl overflow-hidden">
-                <div className="flex items-center gap-2 px-3 py-2.5">
-                  <Icon name="Search" size={13} className="text-violet-400 flex-shrink-0" />
-                  <input autoFocus value={searchQ} onChange={e => setSearchQ(e.target.value)}
-                    onKeyDown={e => e.key === 'Enter' && doSearch()}
-                    placeholder="Search destination…"
-                    className="flex-1 bg-transparent text-sm text-white placeholder-slate-600 focus:outline-none" />
-                  {searching
-                    ? <Icon name="Loader2" size={13} className="text-violet-400 animate-spin" />
-                    : <button onClick={doSearch}><Icon name="ArrowRight" size={13} className="text-violet-400" /></button>}
-                  <button onClick={() => { setShowSearch(false); setSearchRes([]) }}>
-                    <Icon name="X" size={13} className="text-slate-500" />
+          {/* Step instruction panel */}
+          {currentStep && !showSearch && (
+            <div className="absolute top-2 left-2 right-2 z-[1000]">
+              <div className="flex items-center gap-3 bg-[#0a0f1e]/95 backdrop-blur border border-violet-500/30 rounded-xl px-3 py-2.5 shadow-xl">
+                <div className="w-9 h-9 rounded-lg bg-violet-500/15 border border-violet-500/25 flex items-center justify-center flex-shrink-0">
+                  <Icon name={stepIcon(currentStep)} size={16} className="text-violet-400" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-semibold text-white leading-snug line-clamp-2">
+                    {stepInstruction(currentStep)}
+                  </div>
+                  {distToNext && (
+                    <div className="text-2xs text-slate-500 mt-0.5">in {distToNext}</div>
+                  )}
+                </div>
+                <button onClick={() => setShowSearch(true)} className="text-slate-600 hover:text-slate-300 flex-shrink-0">
+                  <Icon name="Search" size={14} />
+                </button>
+              </div>
+              {/* Route summary strip */}
+              {routeInfo && (
+                <div className="flex items-center gap-3 bg-[#0d1426]/90 backdrop-blur border border-slate-800/60 rounded-xl px-3 py-1.5 mt-1 shadow-lg">
+                  <Icon name="MapPin" size={11} className="text-cyan-400 flex-shrink-0" />
+                  <span className="text-2xs text-slate-400 flex-1 truncate">{destName}</span>
+                  <span className="text-2xs text-cyan-400 tabular-nums">{fmtDist(routeInfo.distance)}</span>
+                  <span className="text-2xs text-slate-600">·</span>
+                  <span className="text-2xs text-violet-400 tabular-nums">{fmtDur(routeInfo.duration)}</span>
+                  <button onClick={clearRoute} className="text-slate-600 hover:text-red-400 ml-1">
+                    <Icon name="X" size={12} />
                   </button>
                 </div>
-                {searchRes.length > 0 && (
-                  <div className="border-t border-slate-800 max-h-56 overflow-y-auto">
-                    {searchRes.map((r, i) => (
-                      <button key={i} onClick={() => selectDest(r)}
-                        className="w-full text-left flex items-start gap-2 px-3 py-2.5 hover:bg-violet-500/10 border-b border-slate-800/30 last:border-0 transition-colors">
-                        <Icon name="MapPin" size={12} className="text-violet-400 mt-0.5 flex-shrink-0" />
-                        <div>
-                          <div className="text-xs text-white line-clamp-1">{r.display_name.split(',').slice(0,2).join(', ')}</div>
-                          <div className="text-2xs text-slate-600 line-clamp-1">{r.display_name.split(',').slice(2,4).join(', ')}</div>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ) : destination ? (
-              <div className="flex items-center gap-2 bg-[#0d1426]/95 backdrop-blur border border-cyan-500/25 rounded-xl px-3 py-2 shadow-lg">
-                <Icon name="Navigation2" size={13} className="text-cyan-400 flex-shrink-0" />
-                <div className="flex-1 min-w-0">
-                  <div className="text-xs text-white font-medium truncate">{destName}</div>
-                  {routeInfo
-                    ? <div className="text-2xs text-cyan-400">{fmtDist(routeInfo.distance)} · {fmtDur(routeInfo.duration)}</div>
-                    : routing ? <div className="text-2xs text-slate-500">Routing…</div>
-                    : null}
-                </div>
-                <button onClick={() => setShowSearch(true)} className="text-slate-500 hover:text-slate-300">
-                  <Icon name="Search" size={12} />
-                </button>
-                <button onClick={clearRoute} className="text-slate-500 hover:text-red-400">
-                  <Icon name="X" size={13} />
-                </button>
-              </div>
-            ) : (
-              <button onClick={() => setShowSearch(true)}
-                className="w-full flex items-center gap-2 bg-[#0d1426]/95 backdrop-blur border border-slate-700/60 rounded-xl px-3 py-2.5 text-left shadow-lg">
-                <Icon name="Search" size={13} className="text-slate-500" />
-                <span className="text-sm text-slate-500">Search destination…</span>
-              </button>
-            )}
-
-            {/* Next step instruction */}
-            {nextStep && !showSearch && (
-              <div className="mt-1.5 flex items-center gap-2 bg-violet-500/15 backdrop-blur border border-violet-500/25 rounded-xl px-3 py-2">
-                <Icon name="TurnRight" size={12} className="text-violet-400 flex-shrink-0" />
-                <span className="text-xs text-violet-200 line-clamp-1">{nextStep}</span>
-              </div>
-            )}
-          </div>
-
-          {/* Map */}
-          {pos ? (
-            <MapContainer center={pos} zoom={15} style={{ width: '100%', height: '100%' }} zoomControl={false}>
-              <TileLayer
-                attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-              />
-              <Marker position={pos} icon={DRIVER_ICON} />
-              {accuracy && <Circle center={pos} radius={accuracy} pathOptions={{ color: '#a78bfa', fillColor: '#a78bfa', fillOpacity: 0.06, weight: 1 }} />}
-              {destination && <Marker position={destination} icon={DEST_ICON} />}
-              {route && <Polyline positions={route} pathOptions={{ color: '#22d3ee', weight: 5, opacity: 0.9 }} />}
-              <MapRecenter pos={pos} follow={follow} />
-            </MapContainer>
-          ) : (
-            <div className="flex flex-col items-center justify-center h-full gap-3 text-slate-600">
-              {gpsOk === 'denied'
-                ? <><Icon name="MapPinOff" size={32} /><div className="text-sm text-red-400">GPS access denied</div><div className="text-xs text-center px-8">Enable location in browser settings</div></>
-                : <><Icon name="Loader2" size={28} className="animate-spin text-violet-400" /><div className="text-sm">Acquiring GPS signal…</div></>}
+              )}
             </div>
           )}
 
-          {/* Map controls */}
-          <div className="absolute right-3 bottom-20 z-[1000] flex flex-col gap-2">
+          {/* Search overlay */}
+          {showSearch || (!currentStep && !destination) ? (
+            <div className="absolute top-2 left-2 right-2 z-[1001]">
+              {showSearch || !destination ? (
+                <div className="bg-[#0d1426]/98 backdrop-blur border border-violet-500/25 rounded-xl shadow-2xl overflow-hidden">
+                  <div className="flex items-center gap-2 px-3 py-2.5">
+                    <Icon name="Search" size={13} className="text-violet-400 flex-shrink-0" />
+                    <input autoFocus value={searchQ} onChange={e => setSearchQ(e.target.value)}
+                      onKeyDown={e => e.key === 'Enter' && doSearch()}
+                      placeholder="Search destination…"
+                      className="flex-1 bg-transparent text-sm text-white placeholder-slate-600 focus:outline-none" />
+                    {searching
+                      ? <Icon name="Loader2" size={13} className="text-violet-400 animate-spin" />
+                      : searchQ.trim()
+                        ? <button onClick={doSearch}><Icon name="ArrowRight" size={13} className="text-violet-400" /></button>
+                        : null}
+                    {showSearch && (
+                      <button onClick={() => { setShowSearch(false); setSearchRes([]) }} className="ml-1">
+                        <Icon name="X" size={13} className="text-slate-500" />
+                      </button>
+                    )}
+                  </div>
+                  {searchRes.length > 0 && (
+                    <div className="border-t border-slate-800/60 max-h-60 overflow-y-auto">
+                      {searchRes.map((r, i) => (
+                        <button key={i} onClick={() => selectDest(r)}
+                          className="w-full text-left flex items-start gap-2 px-3 py-2.5 hover:bg-violet-500/10 border-b border-slate-800/30 last:border-0 transition-colors">
+                          <Icon name="MapPin" size={12} className="text-violet-400 mt-0.5 flex-shrink-0" />
+                          <div>
+                            <div className="text-xs text-white line-clamp-1">{r.display_name.split(',').slice(0, 2).join(', ')}</div>
+                            <div className="text-2xs text-slate-600 line-clamp-1">{r.display_name.split(',').slice(2, 5).join(', ')}</div>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {/* Routing spinner */}
+          {routing && (
+            <div className="absolute top-2 left-1/2 -translate-x-1/2 z-[1002] flex items-center gap-2 bg-[#0d1426]/95 border border-violet-500/25 rounded-xl px-4 py-2">
+              <Icon name="Loader2" size={13} className="text-violet-400 animate-spin" />
+              <span className="text-xs text-slate-400">Calculating route…</span>
+            </div>
+          )}
+
+          {/* Leaflet map */}
+          {pos ? (
+            <MapContainer center={pos} zoom={16} style={{ width: '100%', height: '100%' }} zoomControl={false}>
+              <TileLayer
+                attribution='&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors'
+                url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+              />
+              {/* Driver position */}
+              <Marker position={pos} icon={DRIVER_ICON} />
+              {/* GPS accuracy ring */}
+              {accuracy && accuracy < 200 && (
+                <Circle center={pos} radius={accuracy}
+                  pathOptions={{ color: '#a78bfa', fillColor: '#a78bfa', fillOpacity: 0.05, weight: 1, dashArray: '4 4' }} />
+              )}
+              {/* Destination marker */}
+              {destination && <Marker position={destination} icon={DEST_ICON} />}
+              {/* Route polyline */}
+              {route && <Polyline positions={route} pathOptions={{ color: '#22d3ee', weight: 5, opacity: 0.9 }} />}
+              {/* Map follow controller */}
+              <MapController pos={pos} follow={follow} zoom={16} />
+            </MapContainer>
+          ) : (
+            <div className="flex flex-col items-center justify-center h-full gap-3">
+              {gpsState === 'denied' ? (
+                <>
+                  <Icon name="MapPinOff" size={36} className="text-red-400/40" />
+                  <div className="text-sm text-red-400">GPS access denied</div>
+                  <div className="text-xs text-slate-600 text-center px-8">Enable location permission in your browser and reload the page.</div>
+                </>
+              ) : (
+                <>
+                  <Icon name="Loader2" size={32} className="text-violet-400 animate-spin" />
+                  <div className="text-sm text-slate-400">Acquiring GPS signal…</div>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Map overlay controls */}
+          <div className="absolute right-3 bottom-28 z-[1000] flex flex-col gap-2">
             <button onClick={() => setFollow(f => !f)}
-              className={`w-10 h-10 rounded-xl border flex items-center justify-center shadow-lg transition-colors ${
-                follow ? 'bg-violet-500/20 border-violet-500/40 text-violet-400' : 'bg-[#0d1426]/90 border-slate-700 text-slate-500'
+              className={`w-10 h-10 rounded-xl border shadow-lg flex items-center justify-center transition-colors ${
+                follow ? 'bg-violet-500/25 border-violet-500/50 text-violet-400' : 'bg-[#0d1426]/90 border-slate-700 text-slate-500'
               }`}>
               <Icon name="Crosshair" size={16} />
             </button>
           </div>
 
-          {/* Trip HUD bottom-left */}
-          <div className="absolute bottom-3 left-3 z-[1000] flex flex-col gap-1">
-            <div className="bg-[#0d1426]/90 border border-slate-800 rounded-xl px-3 py-2 flex items-end gap-1">
-              <span className={`text-2xl font-bold font-mono tabular-nums ${speed > 80 ? 'text-red-400' : speed > 60 ? 'text-amber-400' : 'text-white'}`}>{speed}</span>
-              <span className="text-xs text-slate-600 mb-0.5">km/h</span>
+          {/* Bottom HUD */}
+          <div className="absolute bottom-3 left-3 right-3 z-[1000] flex items-end justify-between pointer-events-none">
+            {/* Speed + trip */}
+            <div className="flex flex-col gap-1">
+              <div className="bg-[#0d1426]/90 border border-slate-800/80 rounded-xl px-3 py-2 flex items-end gap-1.5 pointer-events-auto">
+                <span className={`text-3xl font-bold font-mono tabular-nums leading-none ${
+                  speed > 90 ? 'text-red-400' : speed > 70 ? 'text-amber-400' : 'text-white'
+                }`}>{speed}</span>
+                <span className="text-xs text-slate-600 mb-0.5">km/h</span>
+              </div>
+              <div className="bg-[#0d1426]/85 border border-slate-800/60 rounded-lg px-3 py-1 pointer-events-auto">
+                <span className="text-2xs text-slate-500 font-mono">Trip: {fmtDist(tripDist)}</span>
+              </div>
             </div>
-            <div className="bg-[#0d1426]/90 border border-slate-800 rounded-xl px-3 py-1.5 text-2xs text-slate-500 font-mono">
-              Trip: {fmtDist(tripDist)}
-            </div>
-          </div>
 
-          {/* OSM attribution */}
-          <div className="absolute bottom-3 right-3 z-[1000]">
-            <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer"
-              className="text-2xs text-slate-700 hover:text-slate-500">© OpenStreetMap contributors</a>
+            {/* OSM attribution */}
+            <div className="pointer-events-auto">
+              <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer"
+                className="text-2xs text-slate-700 hover:text-slate-500">© OpenStreetMap</a>
+            </div>
           </div>
         </div>
       )}
@@ -690,73 +1002,109 @@ function DriverAppMain({ profile, onLogout }) {
       {tab === 'safety' && (
         <div className="flex-1 overflow-y-auto scrollbar-none p-4 space-y-4">
 
-          {/* Live metrics */}
+          {/* Live metric grid */}
           <div className="grid grid-cols-2 gap-3">
+
             {/* Fatigue */}
-            <div className={`p-4 rounded-xl border ${fatigueBg} flex flex-col items-center gap-1`}>
-              <Icon name="Eye" size={18} className={fatigueColor} />
-              <div className={`text-3xl font-bold font-mono tabular-nums ${fatigueColor}`}>{fatigueScore}</div>
-              <div className="text-2xs text-slate-500">Fatigue Score / 100</div>
-              <div className={`text-2xs font-semibold uppercase tracking-wider ${fatigueColor}`}>
-                {alertLevel === 'danger' ? 'CRITICAL' : alertLevel === 'warn' ? 'WARNING' : 'OK'}
+            <div className={`flex flex-col items-center gap-1.5 p-4 rounded-xl border ${fatigueBorder}`}>
+              <Icon name="Eye" size={20} className={fatigueColor} />
+              <div className={`text-4xl font-bold font-mono tabular-nums leading-none ${fatigueColor}`}>{fatigueScore}</div>
+              <div className="text-2xs text-slate-500">Fatigue Score /100</div>
+              <div className={`text-2xs font-bold uppercase tracking-widest ${fatigueColor}`}>
+                {alertLevel === 'danger' ? '⚠ CRITICAL' : alertLevel === 'warn' ? '△ WARNING' : '✓ SAFE'}
               </div>
             </div>
 
             {/* Session timer */}
-            <div className="p-4 rounded-xl border border-slate-800/60 bg-slate-900/40 flex flex-col items-center gap-1">
-              <Icon name="Clock" size={18} className="text-cyan-400" />
-              <div className="text-2xl font-bold font-mono tabular-nums text-white">{fmtTime(sessionSecs)}</div>
+            <div className={`flex flex-col items-center gap-1.5 p-4 rounded-xl border ${
+              sessionSecs >= EU_DRIVE_SECS ? 'border-red-500/30 bg-red-500/5' : 'border-slate-800/60 bg-slate-900/40'
+            }`}>
+              <Icon name="Clock" size={20} className={sessionSecs >= EU_DRIVE_SECS ? 'text-red-400' : 'text-cyan-400'} />
+              <div className={`text-2xl font-bold font-mono tabular-nums leading-none ${sessionSecs >= EU_DRIVE_SECS ? 'text-red-400' : 'text-white'}`}>
+                {fmtClock(sessionSecs)}
+              </div>
               <div className="text-2xs text-slate-500">Session Time</div>
-              <div className={`text-2xs font-semibold ${sessionSecs > EU_DRIVE_SECS ? 'text-red-400' : 'text-slate-600'}`}>
-                {sessionSecs > EU_DRIVE_SECS ? 'BREAK REQUIRED' : `EU break in ${fmtDur(Math.max(0, EU_DRIVE_SECS - sessionSecs))}`}
+              <div className={`text-2xs font-semibold ${sessionSecs >= EU_DRIVE_SECS ? 'text-red-400' : 'text-slate-600'}`}>
+                {sessionSecs >= EU_DRIVE_SECS
+                  ? 'BREAK REQUIRED NOW'
+                  : `Break in ${fmtDur(Math.max(0, EU_DRIVE_SECS - sessionSecs))}`}
               </div>
             </div>
 
             {/* Speed */}
-            <div className={`p-4 rounded-xl border flex flex-col items-center gap-1 ${
-              speed > 80 ? 'border-red-500/30 bg-red-500/5' : speed > 60 ? 'border-amber-500/30 bg-amber-500/5' : 'border-slate-800/60 bg-slate-900/40'
+            <div className={`flex flex-col items-center gap-1.5 p-4 rounded-xl border ${
+              speed > 90 ? 'border-red-500/30 bg-red-500/5' :
+              speed > 70 ? 'border-amber-500/30 bg-amber-500/5' :
+              'border-slate-800/60 bg-slate-900/40'
             }`}>
-              <Icon name="Gauge" size={18} className={speed > 80 ? 'text-red-400' : speed > 60 ? 'text-amber-400' : 'text-cyan-400'} />
-              <div className={`text-3xl font-bold font-mono tabular-nums ${speed > 80 ? 'text-red-400' : speed > 60 ? 'text-amber-400' : 'text-white'}`}>{speed}</div>
+              <Icon name="Gauge" size={20} className={speed > 90 ? 'text-red-400' : speed > 70 ? 'text-amber-400' : 'text-cyan-400'} />
+              <div className={`text-4xl font-bold font-mono tabular-nums leading-none ${speed > 90 ? 'text-red-400' : speed > 70 ? 'text-amber-400' : 'text-white'}`}>{speed}</div>
               <div className="text-2xs text-slate-500">km/h</div>
             </div>
 
-            {/* Trip */}
-            <div className="p-4 rounded-xl border border-slate-800/60 bg-slate-900/40 flex flex-col items-center gap-1">
-              <Icon name="Route" size={18} className="text-violet-400" />
-              <div className="text-2xl font-bold font-mono tabular-nums text-white">{fmtDist(tripDist)}</div>
+            {/* Trip distance */}
+            <div className="flex flex-col items-center gap-1.5 p-4 rounded-xl border border-slate-800/60 bg-slate-900/40">
+              <Icon name="Route" size={20} className="text-violet-400" />
+              <div className="text-2xl font-bold font-mono tabular-nums leading-none text-white">{fmtDist(tripDist)}</div>
               <div className="text-2xs text-slate-500">Trip Distance</div>
+              {heading != null && (
+                <div className="text-2xs text-slate-600 font-mono">{heading}° {bearingLabel(heading)}</div>
+              )}
             </div>
           </div>
 
           {/* Break button */}
-          <button onClick={resetSession}
-            className="w-full flex items-center justify-center gap-2 py-3 rounded-xl border border-emerald-500/25 bg-emerald-500/10 text-emerald-400 text-sm font-semibold hover:bg-emerald-500/15 transition-colors">
+          <button onClick={() => {
+            resetSession()
+            try { sendFleetReply(profile.id, `${profile.full_name} has taken a break — session timer reset`, false) } catch {}
+          }}
+            className="w-full flex items-center justify-center gap-2 py-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/15 text-emerald-400 text-sm font-semibold transition-colors">
             <Icon name="Coffee" size={15} />
             Log Break Taken — Reset Session Timer
           </button>
 
-          {/* Apex Sentinel AI */}
+          {/* Apex Sentinel AI panel */}
           <div className="bg-[#0d1426] border border-violet-500/15 rounded-xl overflow-hidden">
-            <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-800/50">
-              <Icon name="Shield" size={14} className="text-violet-400" />
+            <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-800/60">
+              <div className="w-6 h-6 rounded bg-violet-500/15 border border-violet-500/25 flex items-center justify-center">
+                <Icon name="Shield" size={12} className="text-violet-400" />
+              </div>
               <span className="text-sm font-semibold text-violet-300">Apex Sentinel AI</span>
-              <span className="text-2xs text-slate-600 ml-auto">Safety coaching</span>
+              {sentinelBusy && <Icon name="Loader2" size={12} className="text-violet-400 animate-spin ml-auto" />}
             </div>
-            <div className="h-40 overflow-y-auto p-3 space-y-2 scrollbar-none">
-              {sentinelChat.length === 0 ? (
-                <div className="text-xs text-slate-700 text-center mt-4">Ask Sentinel a safety question…</div>
-              ) : sentinelChat.map((m, i) => (
+
+            {/* Sentinel quick-action prompts */}
+            {sentinelLog.length === 0 && (
+              <div className="px-3 pt-3 pb-2 flex flex-wrap gap-1.5">
+                {[
+                  'Am I safe to keep driving?',
+                  'What does UK law say about my break requirements?',
+                  'How do I reduce fatigue on long hauls?',
+                ].map(q => (
+                  <button key={q} onClick={() => askSentinel(q)}
+                    className="text-2xs bg-slate-800/60 border border-slate-700/50 text-slate-400 hover:text-violet-400 hover:border-violet-500/30 rounded-lg px-2.5 py-1.5 transition-colors text-left">
+                    {q}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Message log */}
+            <div className="max-h-48 overflow-y-auto p-3 space-y-2 scrollbar-none">
+              {sentinelLog.map((m, i) => (
                 <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`max-w-[85%] text-xs px-3 py-2 rounded-xl leading-relaxed ${
+                  <div className={`max-w-[88%] text-xs px-3 py-2 rounded-xl leading-relaxed ${
                     m.role === 'user'
                       ? 'bg-violet-500/15 border border-violet-500/20 text-violet-100'
+                      : m.module === 'routemind'
+                      ? 'bg-cyan-500/8 border border-cyan-500/20 text-cyan-100'
                       : 'bg-slate-800/60 border border-slate-700/40 text-slate-300'
                   }`}>
                     {m.role === 'assistant' && (
                       <div className="flex items-center gap-1 mb-1">
-                        <Icon name="Shield" size={9} className="text-violet-400" />
-                        <span className="text-2xs text-violet-400 font-semibold uppercase">
+                        <Icon name={m.module === 'routemind' ? 'Navigation2' : 'Shield'} size={9}
+                          className={m.module === 'routemind' ? 'text-cyan-400' : 'text-violet-400'} />
+                        <span className={`text-2xs font-bold uppercase tracking-wider ${m.module === 'routemind' ? 'text-cyan-400' : 'text-violet-400'}`}>
                           {m.module === 'routemind' ? 'RouteMind' : 'Sentinel'}
                         </span>
                       </div>
@@ -765,19 +1113,17 @@ function DriverAppMain({ profile, onLogout }) {
                   </div>
                 </div>
               ))}
-              {sentinelBusy && (
-                <div className="flex items-center gap-2 text-2xs text-slate-600">
-                  <Icon name="Loader2" size={10} className="animate-spin" /> Sentinel thinking…
-                </div>
-              )}
             </div>
+
+            {/* Input */}
             <div className="flex gap-2 p-3 border-t border-slate-800/50">
-              <input value={sentinelInput} onChange={e => setSentinelInput(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && askSentinel(sentinelInput)}
-                placeholder="Ask Sentinel…"
-                className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-600 focus:border-violet-500 focus:outline-none" />
-              <button onClick={() => askSentinel(sentinelInput)} disabled={!sentinelInput.trim() || sentinelBusy}
-                className="px-3 py-2 bg-violet-500/15 border border-violet-500/25 rounded-lg text-violet-400 hover:bg-violet-500/25 disabled:opacity-30 transition-colors">
+              <input value={sentinelQ} onChange={e => setSentinelQ(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && askSentinel(sentinelQ)}
+                placeholder="Ask Sentinel a safety question…"
+                disabled={sentinelBusy}
+                className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-600 focus:border-violet-500 focus:outline-none disabled:opacity-50" />
+              <button onClick={() => askSentinel(sentinelQ)} disabled={!sentinelQ.trim() || sentinelBusy}
+                className="w-9 h-9 flex items-center justify-center bg-violet-500/15 border border-violet-500/25 rounded-lg text-violet-400 hover:bg-violet-500/25 disabled:opacity-30 transition-colors">
                 <Icon name="Send" size={13} />
               </button>
             </div>
@@ -785,17 +1131,25 @@ function DriverAppMain({ profile, onLogout }) {
 
           {/* Alert history */}
           <div>
-            <div className="text-xs text-slate-600 font-semibold uppercase tracking-wider mb-2">Alert History ({safetyAlerts.length})</div>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-2xs text-slate-600 font-semibold uppercase tracking-wider">Alert History</span>
+              <span className="text-2xs text-slate-700">{safetyAlerts.length} this session</span>
+            </div>
             {safetyAlerts.length === 0 ? (
-              <div className="text-xs text-slate-700 text-center py-4">No alerts this session</div>
+              <div className="text-xs text-slate-700 text-center py-6 border border-slate-800/40 rounded-xl">
+                ✓ No alerts this session
+              </div>
             ) : (
               <div className="space-y-1.5">
-                {safetyAlerts.slice(0, 15).map((a, i) => (
-                  <div key={a.id || i} className="flex items-start gap-2 bg-slate-900/40 border border-slate-800/40 rounded-lg px-3 py-2">
-                    <Icon name="AlertTriangle" size={11} className={a.type?.includes('critical') ? 'text-red-400 mt-0.5' : 'text-amber-400 mt-0.5'} />
+                {safetyAlerts.slice(0, 20).map((a, i) => (
+                  <div key={a.id || i} className="flex items-start gap-2 bg-slate-900/50 border border-slate-800/40 rounded-lg px-3 py-2">
+                    <Icon name="AlertTriangle" size={11}
+                      className={`flex-shrink-0 mt-0.5 ${a.type === 'fatigue_critical' || a.severity === 'critical' ? 'text-red-400' : 'text-amber-400'}`} />
                     <div className="flex-1 min-w-0">
                       <div className="text-xs text-slate-300 leading-snug">{a.text}</div>
-                      <div className="text-2xs text-slate-700 font-mono mt-0.5">{new Date(a.ts).toLocaleTimeString('en-GB', { hour12: false })}</div>
+                      <div className="text-2xs text-slate-700 font-mono mt-0.5">
+                        {new Date(a.ts).toLocaleTimeString('en-GB', { hour12: false })}
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -808,16 +1162,16 @@ function DriverAppMain({ profile, onLogout }) {
       {/* ══════════ CHAT TAB ══════════ */}
       {tab === 'chat' && (
         <div className="flex-1 flex flex-col overflow-hidden">
-          <div className="flex-1 overflow-y-auto p-3 space-y-2 scrollbar-none">
+          <div className="flex-1 overflow-y-auto p-3 space-y-2.5 scrollbar-none">
             {messages.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-full gap-2 text-slate-700">
-                <Icon name="MessageSquare" size={28} className="opacity-20" />
-                <div className="text-xs text-center">No messages yet.<br />Send a message to fleet ops.</div>
+              <div className="flex flex-col items-center justify-center h-full gap-3 text-slate-700">
+                <Icon name="MessageSquare" size={32} className="opacity-20" />
+                <div className="text-xs text-center">No messages yet.<br />Messages with fleet ops will appear here.</div>
               </div>
             ) : messages.map((msg, i) => (
               <div key={msg.id || i} className={`flex ${msg.from === 'driver' ? 'justify-end' : 'justify-start'}`}>
-                <div className="max-w-[82%] flex flex-col gap-0.5">
-                  <div className={`flex items-center gap-1 px-1 ${msg.from === 'driver' ? 'justify-end' : ''}`}>
+                <div className={`max-w-[82%] flex flex-col gap-0.5 ${msg.from === 'driver' ? 'items-end' : 'items-start'}`}>
+                  <div className={`flex items-center gap-1 px-0.5`}>
                     <Icon name={msg.from === 'driver' ? 'User' : msg.from === 'ai' ? 'Cpu' : 'Radio'} size={9}
                       className={msg.from === 'driver' ? 'text-violet-400' : msg.from === 'ai' ? 'text-cyan-400' : 'text-emerald-400'} />
                     <span className="text-2xs text-slate-600">
@@ -827,18 +1181,19 @@ function DriverAppMain({ profile, onLogout }) {
                       {new Date(msg.ts).toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit' })}
                     </span>
                   </div>
-                  <div className={`px-3 py-2 rounded-xl text-xs leading-relaxed ${
+                  <div className={`px-3 py-2 rounded-2xl text-xs leading-relaxed ${
                     msg.from === 'driver'
-                      ? 'bg-violet-500/15 border border-violet-500/25 text-violet-100'
+                      ? 'bg-violet-500/15 border border-violet-500/20 text-violet-100 rounded-tr-sm'
                       : msg.from === 'ai'
-                      ? 'bg-cyan-500/10 border border-cyan-500/20 text-cyan-100'
-                      : 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-100'
+                      ? 'bg-cyan-500/10 border border-cyan-500/20 text-cyan-100 rounded-tl-sm'
+                      : 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-100 rounded-tl-sm'
                   }`}>{msg.text}</div>
                 </div>
               </div>
             ))}
             <div ref={chatEndRef} />
           </div>
+
           <div className="flex gap-2 p-3 border-t border-slate-800/50 bg-[#0a1020] flex-shrink-0">
             <input value={chatInput} onChange={e => setChatInput(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && sendChat()}
@@ -854,52 +1209,94 @@ function DriverAppMain({ profile, onLogout }) {
 
       {/* ══════════ JOBS TAB ══════════ */}
       {tab === 'jobs' && (
-        <div className="flex-1 overflow-y-auto p-4 space-y-3 scrollbar-none">
+        <div className="flex-1 overflow-y-auto scrollbar-none p-4 space-y-3">
+
+          {/* Refresh button */}
+          <button onClick={() => setJobs(loadJobs(profile.id))}
+            className="w-full flex items-center justify-center gap-2 py-2 rounded-xl border border-slate-800/60 text-slate-600 hover:text-slate-400 hover:border-slate-700 text-xs transition-colors">
+            <Icon name="RefreshCw" size={11} />
+            Refresh Jobs
+          </button>
+
           {jobs.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-full gap-2 text-slate-700">
-              <Icon name="Package" size={28} className="opacity-20" />
-              <div className="text-xs text-center">No jobs assigned.<br />Fleet ops will push jobs from the dashboard.</div>
+            <div className="flex flex-col items-center justify-center gap-3 py-12 text-slate-700">
+              <Icon name="Package" size={36} className="opacity-15" />
+              <div className="text-xs text-center text-slate-600">No jobs assigned.<br />Fleet ops will dispatch jobs from the dashboard.</div>
             </div>
-          ) : jobs.map(job => (
-            <div key={job.id}
-              className={`bg-[#0d1426] border rounded-xl p-4 ${activeJob?.id === job.id ? 'border-violet-500/40' : 'border-slate-800/60'}`}>
-              <div className="flex items-start justify-between mb-2">
-                <div className="flex items-center gap-1.5">
-                  <Icon name="Package" size={13} className="text-violet-400" />
-                  <span className="text-xs font-semibold text-white">{job.title}</span>
+          ) : (
+            jobs.map(job => {
+              const isActive = activeJob?.id === job.id
+              const priColor = {
+                urgent: 'text-red-400 border-red-500/30 bg-red-500/5',
+                high:   'text-amber-400 border-amber-500/30 bg-amber-500/5',
+                normal: 'text-cyan-400 border-cyan-500/30 bg-cyan-500/5',
+                low:    'text-slate-500 border-slate-700 bg-slate-900/40',
+              }[job.priority] || 'text-slate-500 border-slate-700 bg-slate-900/40'
+
+              return (
+                <div key={job.id}
+                  className={`bg-[#0d1426] border rounded-xl p-4 transition-all ${
+                    isActive ? 'border-violet-500/40 shadow-[0_0_16px_rgba(139,92,246,0.1)]' : 'border-slate-800/60'
+                  }`}>
+
+                  {/* Header */}
+                  <div className="flex items-start justify-between gap-2 mb-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Icon name="Package" size={13} className={isActive ? 'text-violet-400' : 'text-slate-600'} />
+                      <span className="text-xs font-semibold text-white truncate">{job.title}</span>
+                    </div>
+                    <span className={`text-2xs px-2 py-0.5 rounded border font-bold uppercase flex-shrink-0 ${priColor}`}>
+                      {job.priority || 'normal'}
+                    </span>
+                  </div>
+
+                  {/* Details */}
+                  {(job.destination || job.dropoff_address || job.address) && (
+                    <div className="flex items-start gap-1.5 text-xs text-slate-500 mb-1">
+                      <Icon name="MapPin" size={10} className="text-violet-400/60 mt-0.5 flex-shrink-0" />
+                      <span className="line-clamp-1">{job.destination || job.dropoff_address || job.address}</span>
+                    </div>
+                  )}
+                  {job.notes && (
+                    <div className="text-2xs text-slate-600 mb-3 line-clamp-2">{job.notes}</div>
+                  )}
+
+                  {/* ETA if active and routing */}
+                  {isActive && routeInfo && (
+                    <div className="flex items-center gap-2 mb-3 px-2 py-1.5 rounded-lg bg-cyan-500/8 border border-cyan-500/15">
+                      <Icon name="Navigation2" size={11} className="text-cyan-400" />
+                      <span className="text-2xs text-cyan-300">{fmtDist(routeInfo.distance)}</span>
+                      <span className="text-2xs text-slate-600">·</span>
+                      <span className="text-2xs text-violet-300">{fmtDur(routeInfo.duration)} ETA</span>
+                    </div>
+                  )}
+
+                  {/* Actions */}
+                  <div className="flex gap-2">
+                    {!isActive ? (
+                      <button onClick={() => navigateToJob(job)}
+                        className="flex-1 py-2 text-xs font-semibold rounded-lg bg-violet-500/15 border border-violet-500/25 text-violet-400 hover:bg-violet-500/25 transition-colors flex items-center justify-center gap-1.5">
+                        <Icon name="Navigation2" size={12} />
+                        Navigate
+                      </button>
+                    ) : (
+                      <>
+                        <button onClick={() => { setActiveJob(null); clearRoute() }}
+                          className="flex-1 py-2 text-xs font-semibold rounded-lg bg-slate-800 border border-slate-700 text-slate-400 hover:text-slate-200 transition-colors">
+                          Cancel
+                        </button>
+                        <button onClick={() => completeJob(job)}
+                          className="flex-1 py-2 text-xs font-semibold rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/20 transition-colors flex items-center justify-center gap-1.5">
+                          <Icon name="CheckCircle" size={12} />
+                          Complete
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </div>
-                <span className={`text-2xs px-2 py-0.5 rounded border font-semibold uppercase ${
-                  job.priority === 'urgent' ? 'text-red-400 border-red-500/30 bg-red-500/5' :
-                  job.priority === 'high'   ? 'text-amber-400 border-amber-500/30 bg-amber-500/5' :
-                  'text-cyan-400 border-cyan-500/30 bg-cyan-500/5'
-                }`}>{job.priority || 'normal'}</span>
-              </div>
-              {job.destination && (
-                <div className="text-xs text-slate-500 mb-3 flex items-center gap-1">
-                  <Icon name="MapPin" size={10} className="text-slate-600" /> {job.destination}
-                </div>
-              )}
-              <div className="flex gap-2">
-                {activeJob?.id !== job.id && (
-                  <button onClick={() => {
-                    setActiveJob(job)
-                    if (job.destination) {
-                      setSearchQ(job.destination)
-                      setTab('map')
-                    }
-                  }} className="flex-1 py-2 text-xs font-semibold rounded-lg bg-violet-500/15 border border-violet-500/25 text-violet-400 hover:bg-violet-500/25 transition-colors">
-                    Navigate
-                  </button>
-                )}
-                {activeJob?.id === job.id && (
-                  <button onClick={() => setActiveJob(null)}
-                    className="flex-1 py-2 text-xs font-semibold rounded-lg bg-emerald-500/15 border border-emerald-500/25 text-emerald-400 hover:bg-emerald-500/25 transition-colors">
-                    ✓ Complete
-                  </button>
-                )}
-              </div>
-            </div>
-          ))}
+              )
+            })
+          )}
         </div>
       )}
     </div>
