@@ -252,7 +252,7 @@ function MapPanel() {
                   ? <Badge variant="cyan"  size="sm">Ready</Badge>
                   : <Badge variant="muted" size="sm">No key</Badge>}
               </div>
-              <p className="text-2xs text-slate-600 line-clamp-2">{p.attribution}</p>
+              <p className="text-2xs text-slate-600 line-clamp-2">{p.attribution?.text || ''}</p>
             </button>
           )
         })}

@@ -16,6 +16,7 @@ import DriverLogin   from './pages_auth_DriverLogin'
 import ResetConfirm  from './pages_auth_ResetConfirm'
 import Setup         from './pages_auth_Setup'
 import DriverImport  from './pages_DriverImport'
+import DriverApp    from './pages_DriverApp'
 
 // App Pages
 import Dashboard   from './pages_Dashboard'
@@ -57,6 +58,7 @@ export const router = createHashRouter([
   { path: '/auth/driver',        element: <LoginOrSetup element={<DriverLogin />} /> },
   { path: '/auth/reset-confirm', element: <ResetConfirm /> },
   { path: '/driver-import',       element: <DriverImport /> },
+  { path: '/driver-app',          element: <DriverApp /> },
 
   // ── Protected App Shell ────────────────────────────────────
   {
