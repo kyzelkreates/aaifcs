@@ -33,6 +33,10 @@ import {
   sendDriverMessage,
   listenForDriverMessages,
   sendFleetReply,
+  pushAIReportToFleet,
+  validatePairingCode,
+  getDriverPairing,
+  clearDriverPairing,
 } from './services_sync_driverSyncService'
 import { aiRouter }   from './services_ai_aiRouter'
 import { mapService }  from './services_maps_mapService'
@@ -336,22 +340,37 @@ function useHarshEventDetector({ vehicleId, driverId, driverName, vehicleReg, on
 //  SETUP SCREEN
 // ══════════════════════════════════════════════════════════════
 function SetupScreen({ onReady }) {
-  const [name, setName] = useState('')
-  const [pin,  setPin]  = useState('')
-  const [reg,  setReg]  = useState('')
-  const [err,  setErr]  = useState('')
+  const [step,     setStep]    = useState('code') // 'code' | 'profile'
+  const [code,     setCode]    = useState('')
+  const [paired,   setPaired]  = useState(null)
+  const [name,     setName]    = useState('')
+  const [pin,      setPin]     = useState('')
+  const [err,      setErr]     = useState('')
+  const [checking, setChecking] = useState(false)
 
-  const submit = () => {
+  const submitCode = () => {
+    if (code.length !== 6) return setErr('Enter the 6-digit code from fleet ops')
+    setChecking(true); setErr('')
+    const result = validatePairingCode(code.trim())
+    setChecking(false)
+    if (!result.ok) return setErr(result.error)
+    setPaired(result)
+    setName(result.driverName || '')
+    setStep('profile')
+  }
+
+  const submitProfile = () => {
     if (!name.trim())   return setErr('Enter your full name')
     if (pin.length < 4) return setErr('PIN must be at least 4 digits')
-    if (!reg.trim())    return setErr('Enter your vehicle registration')
+    const reg = paired?.vehicleReg || 'UNKNOWN'
     const profile = {
-      id:          `drv-${Date.now()}`,
-      full_name:   name.trim(),
+      id:           paired?.driverId || `drv-${Date.now()}`,
+      full_name:    name.trim(),
       pin,
-      vehicle_reg: reg.trim().toUpperCase(),
-      vehicle_id:  `veh-${reg.trim().toLowerCase().replace(/\s+/g, '')}`,
-      created_at:  tsNow(),
+      vehicle_reg:  reg.toUpperCase(),
+      vehicle_id:   `veh-${reg.toLowerCase().replace(/\s+/g, '')}`,
+      fleet_paired: true,
+      created_at:   tsNow(),
     }
     localStorage.setItem(STORAGE_CREDS, JSON.stringify(profile))
     onReady(profile)
@@ -368,30 +387,59 @@ function SetupScreen({ onReady }) {
           <div className="text-sm text-slate-500">Apex Intelligent Fleet Navigation</div>
         </div>
 
-        <div className="bg-[#0d1426] border border-violet-500/15 rounded-2xl p-6 space-y-4">
-          <div>
-            <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">Full Name</label>
-            <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. James Carter"
-              className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:border-violet-500 focus:outline-none" />
+        {step === 'code' ? (
+          <div className="bg-[#0d1426] border border-violet-500/15 rounded-2xl p-6 space-y-4">
+            <div className="flex items-start gap-3 p-3 rounded-xl bg-violet-500/5 border border-violet-500/20">
+              <Icon name="ShieldCheck" size={16} className="text-violet-400 flex-shrink-0 mt-0.5" />
+              <div className="text-xs text-slate-400 leading-relaxed">
+                Ask your fleet manager for a <span className="text-violet-300 font-semibold">6-digit pairing code</span>. This links your device to the fleet without giving access to fleet systems.
+              </div>
+            </div>
+            <div>
+              <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">Fleet Pairing Code</label>
+              <input
+                value={code}
+                onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                placeholder="000000"
+                type="text" inputMode="numeric" maxLength={6} autoFocus
+                onKeyDown={e => e.key === 'Enter' && submitCode()}
+                className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-3 text-2xl text-white placeholder-slate-700 focus:border-violet-500 focus:outline-none font-mono tracking-[0.5em] text-center"
+              />
+            </div>
+            {err && <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{err}</div>}
+            <button onClick={submitCode} disabled={code.length !== 6 || checking}
+              className="w-full bg-violet-500 hover:bg-violet-600 disabled:opacity-40 text-white font-semibold rounded-xl py-3 text-sm transition-colors">
+              {checking ? 'Verifying…' : 'Verify Code'}
+            </button>
           </div>
-          <div>
-            <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">Vehicle Registration</label>
-            <input value={reg} onChange={e => setReg(e.target.value.toUpperCase())} placeholder="e.g. AB21 XYZ"
-              className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:border-violet-500 focus:outline-none font-mono" />
+        ) : (
+          <div className="bg-[#0d1426] border border-emerald-500/20 rounded-2xl p-6 space-y-4">
+            <div className="flex items-center gap-2 p-3 rounded-xl bg-emerald-500/8 border border-emerald-500/20">
+              <Icon name="CheckCircle2" size={16} className="text-emerald-400 flex-shrink-0" />
+              <div>
+                <div className="text-xs font-semibold text-emerald-300">Code verified ✓</div>
+                <div className="text-2xs text-slate-500 font-mono">Vehicle: {paired?.vehicleReg || '—'}</div>
+              </div>
+            </div>
+            <div>
+              <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">Your Name</label>
+              <input value={name} onChange={e => setName(e.target.value)} placeholder="Confirm your name"
+                className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:border-violet-500 focus:outline-none" />
+            </div>
+            <div>
+              <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">Set a PIN (4+ digits)</label>
+              <input value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, ''))} type="password"
+                inputMode="numeric" maxLength={8} placeholder="••••"
+                className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:border-violet-500 focus:outline-none" />
+            </div>
+            {err && <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{err}</div>}
+            <button onClick={submitProfile}
+              className="w-full bg-violet-500 hover:bg-violet-600 text-white font-semibold rounded-xl py-3 text-sm transition-colors">
+              Start Driving
+            </button>
           </div>
-          <div>
-            <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">Set PIN (4+ digits)</label>
-            <input value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, ''))} type="password"
-              inputMode="numeric" maxLength={8} placeholder="••••"
-              className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:border-violet-500 focus:outline-none" />
-          </div>
-          {err && <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{err}</div>}
-          <button onClick={submit}
-            className="w-full bg-violet-500 hover:bg-violet-600 text-white font-semibold rounded-xl py-3 text-sm transition-colors">
-            Start Driving
-          </button>
-        </div>
-        <p className="text-center text-2xs text-slate-700">Powered by OpenStreetMap · OSRM · Apex AI Safety</p>
+        )}
+        <p className="text-center text-2xs text-slate-700">AP3X Driver · Secured by fleet pairing code · No fleet dashboard access</p>
       </div>
     </div>
   )
@@ -751,6 +799,7 @@ function DriverAppMain({ profile, onLogout }) {
   }
 
   // ── RouteMind AI tip on new destination ──────────────────────
+  // ── RouteMind AI tip on new destination ──────────────────────
   const askRouteMind = async (destCoords) => {
     try {
       const msg = `I'm driving to ${destName || destCoords?.join(',')}. Current position: ${pos?.join(',')}. Give me a 1-sentence efficient route tip.`
@@ -761,6 +810,19 @@ function DriverAppMain({ profile, onLogout }) {
           role: 'assistant', module: 'routemind',
           text: `🧭 RouteMind: ${tip}`, ts: tsNow(),
         }])
+        // Push RouteMind insight to fleet dashboard
+        try {
+          pushAIReportToFleet({
+            driverId:    profile.id,
+            driverName:  profile.full_name,
+            vehicleReg:  profile.vehicle_reg,
+            vehicleId:   profile.vehicle_id,
+            module:      'routemind',
+            summary:     tip,
+            destination: destName || null,
+            speed,
+          })
+        } catch {}
       }
     } catch {}
   }
@@ -785,6 +847,23 @@ function DriverAppMain({ profile, onLogout }) {
       const res   = await aiRouter.routeModule('apex_sentinel', `${question}\n\nDriver context: ${ctx}`)
       const reply = res?.content || (typeof res === 'string' ? res : 'No response from Sentinel')
       setSentinelLog(prev => [...prev, { role: 'assistant', module: 'sentinel', text: reply, ts: tsNow() }])
+      // Push Sentinel report to fleet dashboard
+      try {
+        pushAIReportToFleet({
+          driverId:    profile.id,
+          driverName:  profile.full_name,
+          vehicleReg:  profile.vehicle_reg,
+          vehicleId:   profile.vehicle_id,
+          module:      'sentinel',
+          question,
+          summary:     reply,
+          fatigueScore,
+          alertLevel,
+          speed,
+          sessionSecs,
+          destination: destName || null,
+        })
+      } catch {}
     } catch {
       setSentinelLog(prev => [...prev, {
         role: 'assistant', module: 'sentinel',
@@ -794,6 +873,7 @@ function DriverAppMain({ profile, onLogout }) {
     }
     setSentinelBusy(false)
   }
+
 
   // ── Fleet chat send ───────────────────────────────────────────
   const sendChat = useCallback(() => {

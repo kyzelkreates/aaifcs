@@ -17,7 +17,7 @@ import { fleetService, VEHICLE_STATUS } from './services_fleet_fleetService'
 import { driverService, DRIVER_STATUS } from './services_drivers_driverService'
 import { safetyService } from './services_safety_safetyService'
 import { telemetryService } from './services_realtime_telemetryService'
-import { listenForDriverTelemetry, listenForDriverMessages, sendFleetReply, getDriverMessageHistory } from './services_sync_driverSyncService'
+import { listenForDriverTelemetry, listenForDriverMessages, sendFleetReply, getDriverMessageHistory, generatePairingCode, getActivePairingCodes, listenForDriverAIReports, getDriverAIReportHistory, listenForPairingEvents } from './services_sync_driverSyncService'
 import { ROUTES } from './config_routes'
 import { useAIChat } from './modules_ai_useAIChat'
 import { formatDateTime } from './utils_format'
@@ -239,18 +239,19 @@ function SystemBar({ vehicles, alerts, loading }) {
 // ─── Driver App Panel ─────────────────────────────────────────
 function DriverAppPanel({ drivers, vehicles }) {
   const [selectedDriver, setSelectedDriver] = useState('')
-  const [tab,            setTab]            = useState('telemetry') // 'telemetry' | 'chat'
-  const [linkCopied,     setLinkCopied]     = useState(false)
-  const [showQR,         setShowQR]         = useState(false)
-  const [qrUrl,          setQrUrl]          = useState('')
+  const [tab,            setTab]            = useState('pairing')   // 'pairing'|'telemetry'|'chat'|'ai_reports'
   const [telemetryFeed,  setTelemetryFeed]  = useState([])
   const [messages,       setMessages]       = useState(() => getDriverMessageHistory(80))
   const [replyInput,     setReplyInput]     = useState('')
   const [aiReplying,     setAiReplying]     = useState(false)
+  const [aiReports,      setAiReports]      = useState(() => getDriverAIReportHistory(80))
+  const [pairingCode,    setPairingCode]    = useState('')
+  const [codeExpiry,     setCodeExpiry]     = useState(null)
+  const [activeCodes,    setActiveCodes]    = useState(() => getActivePairingCodes())
+  const [codeGenDriver,  setCodeGenDriver]  = useState('')
   const feedRef    = useRef(null)
   const chatEndRef = useRef(null)
   const { sendMessage: aiSend } = useAIChat('Sentinel')
-  const appURL = `${window.location.href.split('#')[0]}#/ap3x`
 
   // ── Live telemetry ─────────────────────────────────────────
   useEffect(() => {
@@ -278,23 +279,38 @@ function DriverAppPanel({ drivers, vehicles }) {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages.length])
 
-  // ── Send link ──────────────────────────────────────────────
-  const buildURL = () => selectedDriver ? `${appURL}?driver_id=${selectedDriver}` : appURL
+  // ── Driver AI reports ──────────────────────────────────────
+  useEffect(() => {
+    const unsub = listenForDriverAIReports((report) => {
+      setAiReports(prev => [report, ...prev].slice(0, 200))
+    })
+    return unsub
+  }, [])
 
-  const sendLink = async () => {
-    try {
-      if (navigator.share) { await navigator.share({ title: 'Apex AP3X Driver App', url: buildURL() }) }
-      else { await navigator.clipboard.writeText(buildURL()); setLinkCopied(true); setTimeout(() => setLinkCopied(false), 2500) }
-    } catch {
-      await navigator.clipboard.writeText(buildURL()).catch(() => {})
-      setLinkCopied(true); setTimeout(() => setLinkCopied(false), 2500)
-    }
+  // ── Pairing events (driver paired successfully) ────────────
+  useEffect(() => {
+    const unsub = listenForPairingEvents((evt) => {
+      if (evt.type === 'paired') {
+        setActiveCodes(getActivePairingCodes())
+      }
+    })
+    return unsub
+  }, [])
+
+  // ── Pairing code generator ─────────────────────────────────
+  const generateCode = () => {
+    const driver   = drivers.find(d => d.id === codeGenDriver)
+    const driverId = codeGenDriver || `guest-${Date.now()}`
+    const name     = driver?.full_name || 'Driver'
+    const reg      = driver?.vehicle_reg || '—'
+    const code     = generatePairingCode(driverId, name, reg, 60)
+    setPairingCode(code)
+    setCodeExpiry(new Date(Date.now() + 60 * 60 * 1000))
+    setActiveCodes(getActivePairingCodes())
   }
 
-  const generateQR = () => {
-    const encoded = encodeURIComponent(buildURL())
-    setQrUrl(`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encoded}&bgcolor=0d1426&color=a78bfa&margin=4`)
-    setShowQR(true)
+  const copyCode = async () => {
+    try { await navigator.clipboard.writeText(pairingCode) } catch {}
   }
 
   // ── Send fleet reply ───────────────────────────────────────
@@ -358,64 +374,92 @@ function DriverAppPanel({ drivers, vehicles }) {
       </div>
 
       <div className="p-4 space-y-4">
-        {/* Send app row */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
-          <div className="md:col-span-1">
-            <label className="text-2xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">Send AP3X App To</label>
-            <select value={selectedDriver} onChange={e => setSelectedDriver(e.target.value)}
-              className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-violet-500 focus:outline-none">
-              <option value="">— All drivers (generic link) —</option>
-              {drivers.map(d => <option key={d.id} value={d.id}>{d.full_name}{d.vehicle_reg ? ` · ${d.vehicle_reg}` : ''}</option>)}
-            </select>
-          </div>
-          <div className="flex gap-2">
-            <button onClick={sendLink}
-              className="flex-1 flex items-center justify-center gap-1.5 bg-violet-500/10 border border-violet-500/25 hover:bg-violet-500/20 text-violet-300 text-xs rounded-lg px-3 py-2 transition-colors">
-              {linkCopied
-                ? <><Icon name="Check" size={12} className="text-emerald-400" /><span className="text-emerald-400">Copied!</span></>
-                : <><Icon name="Share2" size={12} />{navigator.share ? 'Share' : 'Copy Link'}</>}
-            </button>
-            <button onClick={generateQR}
-              className="flex-1 flex items-center justify-center gap-1.5 bg-cyan-500/10 border border-cyan-500/25 hover:bg-cyan-500/20 text-cyan-300 text-xs rounded-lg px-3 py-2 transition-colors">
-              <Icon name="QrCode" size={12} /> QR Code
-            </button>
-          </div>
-          {driver && (
-            <div className="flex items-center gap-2 px-3 py-2 bg-violet-500/5 border border-violet-500/15 rounded-lg">
-              <StatusDot status="online" />
-              <span className="text-xs text-slate-300">{driver.full_name}</span>
-              <span className="text-2xs text-slate-600 ml-auto capitalize">{driver.status?.replace('_',' ')}</span>
-            </div>
-          )}
-        </div>
-
-        {/* QR */}
-        {showQR && (
-          <div className="relative border border-violet-500/20 rounded-xl bg-[#060b18] p-4 flex flex-col items-center gap-3">
-            <button onClick={() => setShowQR(false)} className="absolute top-2 right-2 text-slate-600 hover:text-slate-400"><Icon name="X" size={14} /></button>
-            <div className="text-2xs text-slate-500 uppercase tracking-wider">Scan with driver's phone</div>
-            <img src={qrUrl} alt="QR" className="w-[160px] h-[160px] rounded-lg" />
-            <div className="text-2xs text-slate-700">{selectedDriver ? 'Driver-specific link' : 'Generic driver link'}</div>
-          </div>
-        )}
-
         {/* Tabs */}
         <div className="border-b border-slate-800/40">
-          <div className="flex gap-1">
+          <div className="flex gap-0.5 overflow-x-auto scrollbar-none">
             {[
-              { key: 'telemetry', label: 'Live Telemetry', icon: 'Gauge',         badge: telemetryFeed.length > 0 ? String(Object.keys(latestByVehicle).length) : null },
-              { key: 'chat',      label: 'Driver Messages', icon: 'MessageSquare', badge: unreadDriverMsgs > 0 ? String(unreadDriverMsgs) : null },
+              { key: 'pairing',    label: 'Pair Driver',      icon: 'KeyRound'      },
+              { key: 'telemetry',  label: 'Telemetry',        icon: 'Gauge',        badge: telemetryFeed.length > 0 ? String(Object.keys(latestByVehicle).length) : null },
+              { key: 'ai_reports', label: 'AI Reports',       icon: 'BrainCircuit', badge: aiReports.length > 0 ? String(aiReports.length) : null },
+              { key: 'chat',       label: 'Messages',         icon: 'MessageSquare',badge: unreadDriverMsgs > 0 ? String(unreadDriverMsgs) : null },
             ].map(t => (
               <button key={t.key} onClick={() => setTab(t.key)}
-                className={`flex items-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors border-b-2 -mb-px ${
+                className={`flex items-center gap-1.5 px-3 py-2 text-2xs font-semibold whitespace-nowrap transition-colors border-b-2 -mb-px ${
                   tab === t.key ? 'text-violet-400 border-violet-400' : 'text-slate-500 border-transparent hover:text-slate-300'}`}>
-                <Icon name={t.icon} size={12} />
+                <Icon name={t.icon} size={11} />
                 {t.label}
                 {t.badge && <span className="text-2xs bg-violet-500/20 text-violet-300 px-1 rounded">{t.badge}</span>}
               </button>
             ))}
           </div>
         </div>
+
+        {/* ── Pairing tab ─────────────────────────────────── */}
+        {tab === 'pairing' && (
+          <div className="space-y-4">
+            <div className="flex items-start gap-3 p-3 rounded-xl bg-amber-500/5 border border-amber-500/20">
+              <Icon name="ShieldAlert" size={14} className="text-amber-400 flex-shrink-0 mt-0.5" />
+              <div className="text-xs text-slate-400 leading-relaxed">
+                Generate a <span className="text-white font-semibold">6-digit code</span> and give it to the driver verbally or via SMS. <span className="text-amber-300">Never share the fleet dashboard URL</span> — drivers access the AP3X Driver app only via the code.
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="text-2xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">Assign To Driver</label>
+                <select value={codeGenDriver} onChange={e => setCodeGenDriver(e.target.value)}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-violet-500 focus:outline-none">
+                  <option value="">— Guest / walk-in driver —</option>
+                  {drivers.map(d => <option key={d.id} value={d.id}>{d.full_name}{d.vehicle_reg ? ` · ${d.vehicle_reg}` : ''}</option>)}
+                </select>
+              </div>
+              <div className="flex items-end">
+                <button onClick={generateCode}
+                  className="w-full flex items-center justify-center gap-2 py-2 rounded-lg bg-violet-500/15 border border-violet-500/30 text-violet-300 text-xs font-semibold hover:bg-violet-500/25 transition-colors">
+                  <Icon name="KeyRound" size={13} /> Generate 6-Digit Code
+                </button>
+              </div>
+            </div>
+
+            {pairingCode && (
+              <div className="flex flex-col items-center gap-3 p-5 bg-[#060b18] border border-violet-500/25 rounded-xl">
+                <div className="text-2xs text-slate-500 uppercase tracking-widest font-semibold">AP3X Pairing Code</div>
+                <div className="text-5xl font-mono font-bold tracking-[0.25em] text-white select-all">{pairingCode}</div>
+                {codeExpiry && (
+                  <div className="text-2xs text-slate-500">Valid for 60 minutes · expires {codeExpiry.toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit' })}</div>
+                )}
+                <div className="flex gap-2 mt-1">
+                  <button onClick={copyCode}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-400 hover:text-white text-xs transition-colors">
+                    <Icon name="Copy" size={11} /> Copy Code
+                  </button>
+                </div>
+                <div className="text-2xs text-slate-600 text-center leading-relaxed">
+                  Tell the driver: open the AP3X Driver app and enter this code.<br />
+                  <span className="text-amber-500/70">Do not share the fleet dashboard link.</span>
+                </div>
+              </div>
+            )}
+
+            {activeCodes.length > 0 && (
+              <div>
+                <div className="text-2xs text-slate-600 font-semibold uppercase tracking-wider mb-2">Active Codes</div>
+                <div className="space-y-1.5">
+                  {activeCodes.map(entry => (
+                    <div key={entry.code} className="flex items-center gap-3 px-3 py-2 bg-slate-900/50 border border-slate-800/50 rounded-lg">
+                      <span className="font-mono text-sm font-bold text-violet-300 tracking-widest">{entry.code}</span>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-xs text-white truncate">{entry.driverName}</div>
+                        <div className="text-2xs text-slate-600 font-mono">{entry.vehicleReg}</div>
+                      </div>
+                      <div className="text-2xs text-slate-600">exp. {new Date(entry.expires).toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit' })}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Telemetry tab */}
         {tab === 'telemetry' && (
@@ -551,6 +595,62 @@ function DriverAppPanel({ drivers, vehicles }) {
               </button>
             </div>
             <div className="text-2xs text-slate-700">Fleet replies are sent directly to the driver's AP3X app in real time. Click <span className="text-cyan-500">AI reply</span> on any driver message to auto-generate a response.</div>
+          </div>
+        )}
+
+        {/* ── AI Reports tab ──────────────────────────────── */}
+        {tab === 'ai_reports' && (
+          <div className="space-y-2">
+            {aiReports.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-8 gap-2 border border-dashed border-slate-800 rounded-xl">
+                <Icon name="BrainCircuit" size={22} className="text-slate-800" />
+                <span className="text-2xs text-slate-700 text-center">No AI reports yet.<br/>Driver Sentinel + RouteMind results appear here automatically.</span>
+              </div>
+            ) : (
+              <div className="space-y-2 max-h-[380px] overflow-y-auto scrollbar-none pr-1">
+                {aiReports.map((r, i) => (
+                  <div key={r.id || i} className={`p-3 rounded-xl border ${
+                    r.module === 'sentinel'
+                      ? 'bg-violet-500/5 border-violet-500/20'
+                      : 'bg-cyan-500/5 border-cyan-500/20'
+                  }`}>
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <Icon name={r.module === 'sentinel' ? 'Shield' : 'Navigation2'} size={11}
+                        className={r.module === 'sentinel' ? 'text-violet-400' : 'text-cyan-400'} />
+                      <span className={`text-2xs font-bold uppercase tracking-wider ${r.module === 'sentinel' ? 'text-violet-400' : 'text-cyan-400'}`}>
+                        {r.module === 'sentinel' ? 'Sentinel' : 'RouteMind'}
+                      </span>
+                      <span className="text-2xs text-slate-600 font-mono ml-auto">
+                        {new Date(r.ts).toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+                      <span className="text-2xs text-white font-semibold">{r.driverName}</span>
+                      <span className="text-2xs text-slate-600 font-mono">{r.vehicleReg}</span>
+                      {r.fatigueScore != null && (
+                        <span className={`text-2xs px-1.5 py-0.5 rounded border font-semibold ${
+                          r.alertLevel === 'danger' ? 'border-red-500/30 text-red-400 bg-red-500/8' :
+                          r.alertLevel === 'warn'   ? 'border-amber-500/30 text-amber-400 bg-amber-500/8' :
+                          'border-emerald-500/30 text-emerald-400 bg-emerald-500/8'
+                        }`}>
+                          Fatigue {r.fatigueScore}%
+                        </span>
+                      )}
+                      {r.speed != null && (
+                        <span className="text-2xs text-slate-600">{r.speed} km/h</span>
+                      )}
+                      {r.destination && (
+                        <span className="text-2xs text-slate-600 truncate max-w-[120px]">→ {r.destination}</span>
+                      )}
+                    </div>
+                    {r.question && (
+                      <div className="text-2xs text-slate-500 italic mb-1">"{r.question}"</div>
+                    )}
+                    <div className="text-xs text-slate-300 leading-relaxed">{r.summary}</div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>

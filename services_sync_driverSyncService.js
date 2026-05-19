@@ -314,3 +314,148 @@ export function getDriverMessageHistory(limit = 80) {
     return all.slice(0, limit)
   } catch { return [] }
 }
+
+
+// ══════════════════════════════════════════════════════════════
+//  FLEET PAIRING CODE SYSTEM
+//  Fleet generates a 6-digit code → driver enters it in driver app
+//  No URL to the fleet dashboard is ever given to a driver
+// ══════════════════════════════════════════════════════════════
+
+const CODE_KEY    = 'apex:fleet:pairing_codes'   // fleet side
+const PAIRED_KEY  = 'apex:driver:fleet_paired'   // driver side
+
+/** Fleet: generate a 6-digit time-limited pairing code for a driver */
+export function generatePairingCode(driverId, driverName, vehicleReg, validMinutes = 60) {
+  const code    = Math.floor(100000 + Math.random() * 900000).toString()
+  const expires = Date.now() + validMinutes * 60 * 1000
+  const entry   = { code, driverId, driverName, vehicleReg, expires, created: Date.now() }
+  try {
+    const all = JSON.parse(localStorage.getItem(CODE_KEY) || '[]')
+    // Remove expired + same driver
+    const cleaned = all.filter(e => e.expires > Date.now() && e.driverId !== driverId)
+    cleaned.unshift(entry)
+    localStorage.setItem(CODE_KEY, JSON.stringify(cleaned))
+  } catch {}
+  return code
+}
+
+/** Fleet: get all active pairing codes */
+export function getActivePairingCodes() {
+  try {
+    const all = JSON.parse(localStorage.getItem(CODE_KEY) || '[]')
+    return all.filter(e => e.expires > Date.now())
+  } catch { return [] }
+}
+
+/** Fleet: revoke a pairing code */
+export function revokePairingCode(code) {
+  try {
+    const all = JSON.parse(localStorage.getItem(CODE_KEY) || '[]')
+    localStorage.setItem(CODE_KEY, JSON.stringify(all.filter(e => e.code !== code)))
+  } catch {}
+}
+
+/**
+ * Driver: validate a pairing code entered by the driver.
+ * Returns { ok, driverId, driverName, vehicleReg } or { ok: false, error }
+ * Works on same device (localStorage) or cross-device via BroadcastChannel reply.
+ */
+export function validatePairingCode(code) {
+  // Same-device check (fleet dashboard open on same browser)
+  try {
+    const all = JSON.parse(localStorage.getItem(CODE_KEY) || '[]')
+    const entry = all.find(e => e.code === code && e.expires > Date.now())
+    if (entry) {
+      // Mark code as used
+      localStorage.setItem(CODE_KEY, JSON.stringify(all.filter(e => e.code !== code)))
+      // Save pairing on driver side
+      localStorage.setItem(PAIRED_KEY, JSON.stringify({
+        driverId:   entry.driverId,
+        driverName: entry.driverName,
+        vehicleReg: entry.vehicleReg,
+        paired_at:  new Date().toISOString(),
+      }))
+      // Broadcast successful pairing to fleet
+      try {
+        const bc = new BroadcastChannel('apex:pairing')
+        bc.postMessage({ type: 'paired', ...entry })
+        bc.close()
+      } catch {}
+      return { ok: true, driverId: entry.driverId, driverName: entry.driverName, vehicleReg: entry.vehicleReg }
+    }
+  } catch {}
+  return { ok: false, error: 'Invalid or expired code. Ask fleet ops for a new one.' }
+}
+
+/** Driver: get current pairing (if any) */
+export function getDriverPairing() {
+  try { return JSON.parse(localStorage.getItem(PAIRED_KEY) || 'null') } catch { return null }
+}
+
+/** Driver: clear pairing (unlink from fleet) */
+export function clearDriverPairing() {
+  try { localStorage.removeItem(PAIRED_KEY) } catch {}
+}
+
+/** Fleet: listen for pairing events */
+export function listenForPairingEvents(callback) {
+  let bc
+  try {
+    bc = new BroadcastChannel('apex:pairing')
+    bc.onmessage = (e) => callback(e.data)
+  } catch {}
+  return () => bc?.close()
+}
+
+// ══════════════════════════════════════════════════════════════
+//  DRIVER AI REPORT → FLEET DASHBOARD
+//  Driver app Sentinel/RouteMind AI results pushed to fleet
+// ══════════════════════════════════════════════════════════════
+
+const AI_REPORT_CHANNEL = 'apex:driver:ai_reports'
+const AI_REPORT_KEY     = 'apex:db:driver_ai_reports'
+
+/**
+ * Driver app: push an AI report to the fleet dashboard.
+ * @param {object} report - { driverId, driverName, vehicleReg, module, summary, fatigueScore, alertLevel, speed, sessionSecs }
+ */
+export function pushAIReportToFleet(report) {
+  const entry = {
+    id:       `air-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,
+    ts:       new Date().toISOString(),
+    type:     'ai_report',
+    ...report,
+  }
+  // BroadcastChannel (same device, instant)
+  try {
+    const bc = new BroadcastChannel(AI_REPORT_CHANNEL)
+    bc.postMessage(entry)
+    bc.close()
+  } catch {}
+  // localStorage (cross-reload persistence)
+  try {
+    const all = JSON.parse(localStorage.getItem(AI_REPORT_KEY) || '[]')
+    all.unshift(entry)
+    localStorage.setItem(AI_REPORT_KEY, JSON.stringify(all.slice(0, 200)))
+  } catch {}
+  return entry
+}
+
+/** Fleet: listen for incoming driver AI reports */
+export function listenForDriverAIReports(callback) {
+  let bc
+  try {
+    bc = new BroadcastChannel(AI_REPORT_CHANNEL)
+    bc.onmessage = (e) => callback(e.data)
+  } catch {}
+  return () => bc?.close()
+}
+
+/** Fleet: get persisted AI report history */
+export function getDriverAIReportHistory(limit = 100) {
+  try {
+    const all = JSON.parse(localStorage.getItem(AI_REPORT_KEY) || '[]')
+    return all.slice(0, limit)
+  } catch { return [] }
+}
