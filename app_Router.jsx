@@ -16,6 +16,7 @@ import DriverLogin   from './pages_auth_DriverLogin'
 import ResetConfirm  from './pages_auth_ResetConfirm'
 import Setup         from './pages_auth_Setup'
 import DriverImport  from './pages_DriverImport'
+import DriverSetup  from './pages_DriverSetup'
 import DriverApp    from './pages_DriverApp'
 
 // App Pages
@@ -83,6 +84,7 @@ export const router = createHashRouter([
       { path: 'vehicles',               element: <Vehicles /> },
       { path: 'vehicles/:vehicleId',    element: <Vehicles /> },
       { path: 'dispatch',               element: <Dispatch /> },
+      { path: 'driver-setup',           element: <DriverSetup /> },
 
       // Navigation
       { path: 'navigation',             element: <Navigation /> },

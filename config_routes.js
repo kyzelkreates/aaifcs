@@ -25,6 +25,9 @@ export const ROUTES = {
   // ── Dispatch ──────────────────────────────────────────────
   DISPATCH: '/dispatch',
 
+  // ── Driver Setup ──────────────────────────────────────────
+  DRIVER_SETUP: '/driver-setup',
+
   // ── Navigation / AP3X ─────────────────────────────────────
   NAVIGATION: '/navigation',
   AP3X:       '/ap3x',
@@ -101,6 +104,14 @@ export const NAV_ITEMS = [
     route: ROUTES.DISPATCH,
     icon:  'Radio',
     group: 'operations'
+  },
+  {
+    id:        'driver-setup',
+    label:     'Set Driver Up With App',
+    route:     ROUTES.DRIVER_SETUP,
+    icon:      'Smartphone',
+    group:     'operations',
+    highlight: true,
   },
   {
     id:    'navigation',

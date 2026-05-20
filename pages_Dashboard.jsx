@@ -18,15 +18,12 @@ import { driverService, DRIVER_STATUS } from './services_drivers_driverService'
 import { safetyService } from './services_safety_safetyService'
 import { telemetryService } from './services_realtime_telemetryService'
 import {
-  listenForDriverTelemetry, listenForDriverMessages, sendFleetReply,
-  getDriverMessageHistory, generatePairingCode, getActivePairingCodes,
-  revokePairingCode, listenForDriverAIReports, getDriverAIReportHistory,
+  listenForDriverTelemetry,
+  listenForDriverMessages,
+  getActivePairingCodes,
   listenForPairingEvents,
-  sendViaWiFiDirect, sendViaNFC, getPairingCodeQR,
-  copyPairingCode, sendPairingCodeEmail, sendPairingCodeWhatsApp,
 } from './services_sync_driverSyncService'
 import { ROUTES } from './config_routes'
-import { useAIChat } from './modules_ai_useAIChat'
 import { fleetLearning }   from './intel_fleetLearning'
 import { complianceEngine } from './intel_complianceEngine'
 import { safetyEngine }     from './intel_safetyEngine'
@@ -258,425 +255,6 @@ function SystemBar({ vehicles, alerts, loading }) {
 }
 
 // ─── Driver App Panel ─────────────────────────────────────────
-function DriverAppPanel({ drivers, vehicles }) {
-  const [selectedDriver, setSelectedDriver] = useState('')
-  const [tab,            setTab]            = useState('pairing')   // 'pairing'|'telemetry'|'chat'|'ai_reports'
-  const [telemetryFeed,  setTelemetryFeed]  = useState([])
-  const [messages,       setMessages]       = useState(() => getDriverMessageHistory(80))
-  const [replyInput,     setReplyInput]     = useState('')
-  const [aiReplying,     setAiReplying]     = useState(false)
-  const [aiReports,      setAiReports]      = useState(() => getDriverAIReportHistory(80))
-  const [pairingCode,         setPairingCode]         = useState('')
-  const [codeExpiry,          setCodeExpiry]          = useState(null)
-  const [activeCodes,         setActiveCodes]         = useState(() => getActivePairingCodes())
-  const [codeGenDriver,       setCodeGenDriver]       = useState('')
-  const [pairingQR,           setPairingQR]           = useState(null)  // { url, deepLink }
-  const [pairingDriverName,   setPairingDriverName]   = useState('')
-  const [pairingDriverReg,    setPairingDriverReg]    = useState('')
-  const [pairingDriverAppURL, setPairingDriverAppURL] = useState('')
-  const [shareStatus,         setShareStatus]         = useState(null)   // null | { method, state: 'ok'|'fail'|'busy', msg }
-  const [nfcStatus,           setNfcStatus]           = useState(null)   // null | 'scanning' | 'written' | 'error'
-  const [copiedCode,          setCopiedCode]          = useState(false)
-  const feedRef    = useRef(null)
-  const chatEndRef = useRef(null)
-  const { sendMessage: aiSend } = useAIChat('Sentinel')
-
-  // ── Live telemetry ─────────────────────────────────────────
-  useEffect(() => {
-    const unsub = listenForDriverTelemetry((data) => {
-      setTelemetryFeed(prev => [{ ...data, _received: new Date().toISOString() }, ...prev].slice(0, 100))
-    })
-    return unsub
-  }, [])
-
-  // ── Driver messages ────────────────────────────────────────
-  useEffect(() => {
-    const unsub = listenForDriverMessages((msg) => {
-      setMessages(prev => {
-        const next = [msg, ...prev].slice(0, 200)
-        return next
-      })
-      if (msg.from === 'driver') {
-        setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 60)
-      }
-    })
-    return unsub
-  }, [])
-
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages.length])
-
-  // ── Driver AI reports ──────────────────────────────────────
-  useEffect(() => {
-    const unsub = listenForDriverAIReports((report) => {
-      setAiReports(prev => [report, ...prev].slice(0, 200))
-    })
-    return unsub
-  }, [])
-
-  // ── Pairing events (driver paired successfully) ────────────
-  useEffect(() => {
-    const unsub = listenForPairingEvents((evt) => {
-      if (evt.type === 'paired') {
-        setActiveCodes(getActivePairingCodes())
-      }
-    })
-    return unsub
-  }, [])
-
-  // ── Pairing code generator ─────────────────────────────────
-  const generateCode = () => {
-    const driver   = drivers?.find(d => d.id === codeGenDriver) || null
-    const driverId = codeGenDriver || `guest-${Date.now()}`
-    const name     = driver?.full_name || 'Driver'
-    const reg      = driver?.vehicle_reg || driver?.license_plate || '—'
-    const driverAppURL = `${window.location.origin}/#/driver-app`
-    const code = generatePairingCode(driverId, name, reg, 60)
-    const qr   = getPairingCodeQR(code, 220)
-    setPairingCode(code)
-    setPairingDriverName(name)
-    setPairingDriverReg(reg)
-    setPairingDriverAppURL(driverAppURL)
-    setPairingQR(qr)
-    setCodeExpiry(new Date(Date.now() + 60 * 60 * 1000))
-    setActiveCodes(getActivePairingCodes())
-    setShareStatus(null)
-    setNfcStatus(null)
-    setCopiedCode(false)
-  }
-
-  // ── Share handlers ─────────────────────────────────────────
-  const handleCopy = async () => {
-    await copyPairingCode(pairingCode)
-    setCopiedCode(true)
-    setTimeout(() => setCopiedCode(false), 2500)
-  }
-
-  const handleWhatsApp = () => {
-    sendPairingCodeWhatsApp(pairingCode, pairingDriverName, pairingDriverReg)
-  }
-
-  const handleEmail = () => {
-    sendPairingCodeEmail(pairingCode, pairingDriverName, pairingDriverReg)
-  }
-
-  const handleWiFiDirect = async () => {
-    setShareStatus({ method: 'wifi', state: 'busy', msg: 'Opening share sheet…' })
-    const res = await sendViaWiFiDirect(pairingCode, pairingDriverName, pairingDriverReg)
-    setShareStatus(res.ok
-      ? { method: 'wifi', state: 'ok',   msg: 'Shared via WiFi Direct / AirDrop / Nearby Share' }
-      : { method: 'wifi', state: 'fail', msg: res.error })
-    setTimeout(() => setShareStatus(null), 4000)
-  }
-
-  const handleNFC = async () => {
-    setNfcStatus('scanning')
-    setShareStatus({ method: 'nfc', state: 'busy', msg: 'Hold driver phone to NFC sensor on this device…' })
-    const res = await sendViaNFC(pairingCode, pairingDriverName, (st) => setNfcStatus(st))
-    setShareStatus(res.ok
-      ? { method: 'nfc', state: 'ok',   msg: 'Code written to NFC — driver phone received it!' }
-      : { method: 'nfc', state: 'fail', msg: res.error })
-    setTimeout(() => { setShareStatus(null); setNfcStatus(null) }, 5000)
-  }
-
-  // ── Send fleet reply ───────────────────────────────────────
-  const sendReply = () => {
-    if (!replyInput.trim()) return
-    const targetId = selectedDriver || messages.find(m => m.from === 'driver')?.driver_id || null
-    const msg = sendFleetReply(targetId, replyInput.trim(), false)
-    setMessages(prev => [msg, ...prev])
-    setReplyInput('')
-  }
-
-  // ── AI auto-reply ──────────────────────────────────────────
-  const handleAIReply = async (driverMsg) => {
-    setAiReplying(true)
-    try {
-      const prompt = `Driver message: "${driverMsg.text}" | Driver: ${driverMsg.driver_name || 'Unknown'} | Vehicle: ${driverMsg.vehicle_reg || '—'} | Reply as fleet AI co-pilot in 1-2 short sentences.`
-      const result = await aiSend(prompt)
-      // aiSend returns via hook state — extract last assistant message
-      // Since we use the hook, just send a fleet reply manually via our channel
-      // We build the reply from the raw API instead
-      const fleetMsg = sendFleetReply(driverMsg.driver_id, '[AI processing — configure API keys in Settings to enable auto-responses]', true)
-      setMessages(prev => [fleetMsg, ...prev])
-    } catch {
-      const fleetMsg = sendFleetReply(driverMsg.driver_id, 'AI unavailable. Configure API keys in Settings.', true)
-      setMessages(prev => [fleetMsg, ...prev])
-    } finally {
-      setAiReplying(false)
-    }
-  }
-
-  const driver           = drivers.find(d => d.id === selectedDriver)
-  const latestByVehicle  = telemetryFeed.reduce((a, t) => { if (!a[t.vehicle_id]) a[t.vehicle_id] = t; return a }, {})
-  const unreadDriverMsgs = messages.filter(m => m.from === 'driver').length
-  const displayMsgs      = [...messages].reverse() // oldest first for chat display
-
-  return (
-    <div className="bg-[#0d1426] border border-violet-500/20 rounded-xl flex flex-col">
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-violet-500/10">
-        <div className="flex items-center gap-2">
-          <div className="w-6 h-6 rounded-lg bg-violet-500/10 border border-violet-500/20 flex items-center justify-center">
-            <Icon name="Smartphone" size={12} className="text-violet-400" />
-          </div>
-          <span className="text-sm font-semibold text-white">Driver App Panel</span>
-          <span className="text-2xs text-violet-400 bg-violet-500/10 border border-violet-500/20 px-1.5 py-0.5 rounded-full">AP3X</span>
-        </div>
-        <div className="flex items-center gap-3">
-          {telemetryFeed.length > 0 && (
-            <span className="flex items-center gap-1 text-2xs text-emerald-400">
-              <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse inline-block" />
-              Live telemetry
-            </span>
-          )}
-          {unreadDriverMsgs > 0 && (
-            <span className="flex items-center gap-1 text-2xs text-violet-300 bg-violet-500/10 border border-violet-500/20 px-2 py-0.5 rounded-full">
-              <Icon name="MessageSquare" size={10} />
-              {unreadDriverMsgs} driver msg{unreadDriverMsgs > 1 ? 's' : ''}
-            </span>
-          )}
-        </div>
-      </div>
-
-      <div className="p-3 sm:p-4 lg:p-6 space-y-4">
-        {/* Tabs */}
-        <div className="border-b border-slate-800/40">
-          <div className="flex gap-0.5 overflow-x-auto scrollbar-none">
-            {[
-              { key: 'pairing',    label: 'Pair Driver',      icon: 'KeyRound'      },
-              { key: 'telemetry',  label: 'Telemetry',        icon: 'Gauge',        badge: telemetryFeed.length > 0 ? String(Object.keys(latestByVehicle).length) : null },
-              { key: 'ai_reports', label: 'AI Reports',       icon: 'BrainCircuit', badge: aiReports.length > 0 ? String(aiReports.length) : null },
-              { key: 'chat',       label: 'Messages',         icon: 'MessageSquare',badge: unreadDriverMsgs > 0 ? String(unreadDriverMsgs) : null },
-            ].map(t => (
-              <button key={t.key} onClick={() => setTab(t.key)}
-                className={`flex items-center gap-1.5 px-3 py-2 text-2xs font-semibold whitespace-nowrap transition-colors border-b-2 -mb-px ${
-                  tab === t.key ? 'text-violet-400 border-violet-400' : 'text-slate-500 border-transparent hover:text-slate-300'}`}>
-                <Icon name={t.icon} size={11} />
-                {t.label}
-                {t.badge && <span className="text-2xs bg-violet-500/20 text-violet-300 px-1 rounded">{t.badge}</span>}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* ── Pairing tab ─────────────────────────────────── */}
-        {/* ── Pairing tab ─────────────────────────────────── */}
-        {tab === 'pairing' && (
-          <div className="space-y-4">
-            <div className="flex items-start gap-3 p-3 rounded-xl bg-amber-500/5 border border-amber-500/20">
-              <Icon name="ShieldAlert" size={14} className="text-amber-400 flex-shrink-0 mt-0.5" />
-              <div className="text-xs text-slate-400 leading-relaxed">
-                Generate a unique <span className="font-mono text-violet-300 font-semibold">APEX-…-DA</span> driver pairing code. Share via QR, NFC, WhatsApp, email, or WiFi Direct.
-                <span className="text-amber-300 font-semibold"> Never share the fleet dashboard URL</span> — drivers use the separate AP3X Driver app only.
-              </div>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
-                <label className="text-2xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">Assign to Driver</label>
-                <select value={codeGenDriver} onChange={e => setCodeGenDriver(e.target.value)}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-violet-500 focus:outline-none">
-                  <option value="">— Guest / walk-in driver —</option>
-                  {drivers.map(d => <option key={d.id} value={d.id}>{d.full_name}{d.vehicle_reg ? ` · ${d.vehicle_reg}` : ''}</option>)}
-                </select>
-              </div>
-              <div className="flex items-end">
-                <button onClick={generateCode}
-                  className="w-full flex items-center justify-center gap-2 py-2 rounded-lg bg-violet-500/15 border border-violet-500/30 text-violet-300 text-xs font-semibold hover:bg-violet-500/25 transition-colors">
-                  <Icon name="KeyRound" size={13} /> Generate Driver Code
-                </button>
-              </div>
-            </div>
-            {pairingCode && (
-              <div className="flex flex-col items-center gap-4 p-5 bg-[#060b18] border border-violet-500/25 rounded-xl">
-                <div className="w-full bg-slate-950 border border-violet-500/20 rounded-2xl px-4 py-4 text-center">
-                  <div className="text-2xs text-slate-600 uppercase tracking-[0.25em] font-semibold mb-2">Driver Pairing Code</div>
-                  <div className="font-mono font-bold text-violet-200 text-base sm:text-lg tracking-[0.12em] leading-relaxed break-all select-all">
-                    {pairingCode}
-                  </div>
-                  {codeExpiry && (
-                    <div className="text-2xs text-slate-600 mt-2 font-mono">
-                      Valid 60 min · expires {codeExpiry.toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit' })}
-                    </div>
-                  )}
-                </div>
-                {pairingQR?.url && (
-                  <div className="flex flex-col items-center gap-2">
-                    <div className="text-2xs text-slate-600 uppercase tracking-wider font-semibold">Scan to open + auto-fill code</div>
-                    <img src={pairingQR.url} alt="Driver App QR" className="w-[180px] h-[180px] rounded-xl border border-violet-500/20" />
-                    <div className="text-2xs text-slate-700">Scan opens AP3X Driver app with code pre-filled</div>
-                  </div>
-                )}
-                {shareStatus && (
-                  <div className={`w-full flex items-center gap-2 px-3 py-2.5 rounded-xl border text-xs ${shareStatus.state === 'ok' ? 'bg-emerald-500/8 border-emerald-500/20 text-emerald-300' : shareStatus.state === 'fail' ? 'bg-red-500/8 border-red-500/20 text-red-300' : 'bg-violet-500/8 border-violet-500/20 text-violet-300'}`}>
-                    <Icon name={shareStatus.state === 'ok' ? 'CheckCircle2' : shareStatus.state === 'fail' ? 'AlertCircle' : 'Loader2'} size={13} className={shareStatus.state === 'busy' ? 'animate-spin' : ''} />
-                    {shareStatus.msg}
-                  </div>
-                )}
-                {nfcStatus === 'scanning' && (
-                  <div className="w-full flex flex-col items-center gap-2 py-3 px-4 rounded-xl bg-cyan-500/5 border border-cyan-500/20">
-                    <Icon name="Wifi" size={24} className="text-cyan-400 animate-pulse" />
-                    <div className="text-xs text-cyan-300 font-semibold">Hold driver's phone to NFC sensor</div>
-                    <div className="text-2xs text-slate-500">APEX-…-DA code will be written to their device</div>
-                  </div>
-                )}
-                <div className="w-full grid grid-cols-3 sm:grid-cols-5 gap-2">
-                  <button onClick={handleCopy} className={`flex flex-col items-center gap-1.5 px-2 py-3 rounded-xl border text-xs transition-colors ${copiedCode ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-slate-800/60 border-slate-700 text-slate-400 hover:text-white hover:border-slate-500'}`}>
-                    <Icon name={copiedCode ? 'CheckCircle2' : 'Copy'} size={15} />
-                    <span className="text-2xs">{copiedCode ? 'Copied!' : 'Copy'}</span>
-                  </button>
-                  <a href={pairingQR?.url} target="_blank" rel="noopener noreferrer"
-                    className="flex flex-col items-center gap-1.5 px-2 py-3 rounded-xl bg-violet-500/8 border border-violet-500/20 text-violet-400 hover:bg-violet-500/15 text-xs transition-colors no-underline">
-                    <Icon name="QrCode" size={15} />
-                    <span className="text-2xs">QR Code</span>
-                  </a>
-                  <button onClick={handleWhatsApp} className="flex flex-col items-center gap-1.5 px-2 py-3 rounded-xl bg-[#25d366]/8 border border-[#25d366]/25 text-[#25d366] hover:bg-[#25d366]/15 text-xs transition-colors">
-                    <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/><path d="M12 2C6.48 2 2 6.48 2 12c0 1.85.5 3.58 1.37 5.07L2 22l5.07-1.35C8.46 21.51 10.2 22 12 22c5.52 0 10-4.48 10-10S17.52 2 12 2zm0 18c-1.69 0-3.27-.47-4.63-1.28l-.33-.2-3.01.8.82-2.96-.22-.35C3.47 14.76 3 13.44 3 12 3 7.03 7.03 3 12 3s9 4.03 9 9-4.03 9-9 9z"/></svg>
-                    <span className="text-2xs">WhatsApp</span>
-                  </button>
-                  <button onClick={handleEmail} className="flex flex-col items-center gap-1.5 px-2 py-3 rounded-xl bg-blue-500/8 border border-blue-500/20 text-blue-400 hover:bg-blue-500/15 text-xs transition-colors">
-                    <Icon name="Mail" size={15} />
-                    <span className="text-2xs">Email</span>
-                  </button>
-                  <button onClick={handleWiFiDirect} disabled={shareStatus?.state === 'busy' && shareStatus?.method === 'wifi'}
-                    className="flex flex-col items-center gap-1.5 px-2 py-3 rounded-xl bg-cyan-500/8 border border-cyan-500/20 text-cyan-400 hover:bg-cyan-500/15 text-xs transition-colors disabled:opacity-40">
-                    <Icon name="Share2" size={15} />
-                    <span className="text-2xs">Share</span>
-                  </button>
-                </div>
-                {'NDEFReader' in window && (
-                  <button onClick={handleNFC} disabled={nfcStatus === 'scanning'}
-                    className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl border text-xs font-semibold transition-colors ${nfcStatus === 'scanning' ? 'bg-cyan-500/10 border-cyan-500/30 text-cyan-400 animate-pulse' : 'bg-slate-800/60 border-slate-700 text-slate-400 hover:text-white hover:border-slate-500'}`}>
-                    <Icon name="Wifi" size={13} />
-                    {nfcStatus === 'scanning' ? 'Hold driver phone to NFC sensor…' : 'Send via NFC tap'}
-                  </button>
-                )}
-                <div className="text-2xs text-slate-700 text-center">Driver opens AP3X Driver app → enters APEX-…-DA code → paired instantly</div>
-              </div>
-            )}
-            {activeCodes.length > 0 && (
-              <div>
-                <div className="text-2xs text-slate-600 font-semibold uppercase tracking-wider mb-2">Active Codes ({activeCodes.length})</div>
-                <div className="space-y-1.5">
-                  {activeCodes.map(entry => (
-                    <div key={entry.code} className="flex items-center gap-3 px-3 py-2 bg-slate-900/50 border border-slate-800/50 rounded-lg">
-                      <div className="flex-1 min-w-0">
-                        <span className="font-mono text-xs font-bold text-violet-300 tracking-wider">{entry.code}</span>
-                        <div className="text-2xs text-slate-600 mt-0.5 truncate">
-                          {entry.driverName || 'Guest'} · {entry.vehicleReg || '—'} · expires {new Date(entry.expires).toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit' })}
-                        </div>
-                      </div>
-                      <button onClick={() => { revokePairingCode(entry.code); setActiveCodes(getActivePairingCodes()) }}
-                        className="text-slate-700 hover:text-red-400 transition-colors flex-shrink-0" title="Revoke">
-                        <Icon name="X" size={12} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ── AI Intelligence tab ─────────────────────────── */}
-        {tab === 'ai_reports' && (
-          <div className="space-y-3">
-            {aiReports.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-10 gap-3 border border-dashed border-slate-800 rounded-xl">
-                <Icon name="BrainCircuit" size={28} className="text-slate-800" />
-                <div className="text-center">
-                  <div className="text-xs text-slate-600 font-semibold">No driver AI reports yet</div>
-                  <div className="text-2xs text-slate-700 mt-1">Sentinel fatigue · RouteMind performance · safety events stream here in real time</div>
-                </div>
-              </div>
-            ) : (
-              <>
-                {(() => {
-                  const latest = aiReports.slice(0, 20)
-                  const fSet = latest.filter(r => r.fatigueScore != null)
-                  const sSet = latest.filter(r => r.safetyScore  != null)
-                  const avgF = fSet.length ? Math.round(fSet.reduce((s,r) => s + r.fatigueScore, 0) / fSet.length) : null
-                  const avgS = sSet.length ? Math.round(sSet.reduce((s,r) => s + r.safetyScore,  0) / sSet.length) : null
-                  const crit = latest.filter(r => r.alertLevel === 'danger').length
-                  const drv  = [...new Set(latest.map(r => r.driverId).filter(Boolean))].length
-                  return (
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                      {[
-                        { label: 'Avg Fatigue',     value: avgF != null ? `${avgF}%`  : '—', color: avgF > 70 ? 'text-red-400' : avgF > 40 ? 'text-amber-400' : 'text-emerald-400' },
-                        { label: 'Avg Safety',      value: avgS != null ? `${avgS}%`  : '—', color: avgS < 60 ? 'text-red-400' : avgS < 80 ? 'text-amber-400' : 'text-emerald-400' },
-                        { label: 'Critical Alerts', value: crit,  color: crit > 0 ? 'text-red-400' : 'text-slate-400' },
-                        { label: 'Active Drivers',  value: drv,   color: 'text-cyan-400' },
-                      ].map(k => (
-                        <div key={k.label} className="bg-slate-900/60 border border-slate-800/60 rounded-xl p-3 text-center">
-                          <div className={`text-lg font-bold font-mono ${k.color}`}>{k.value}</div>
-                          <div className="text-2xs text-slate-600 mt-0.5 leading-tight">{k.label}</div>
-                        </div>
-                      ))}
-                    </div>
-                  )
-                })()}
-                <div className="space-y-2 max-h-[340px] overflow-y-auto scrollbar-none pr-1">
-                  {aiReports.map((r, i) => {
-                    const isSentinel = r.module === 'sentinel'
-                    const isHarsh    = r.module === 'harsh_event'
-                    const modColor   = isSentinel ? 'text-violet-400' : isHarsh ? 'text-red-400' : 'text-cyan-400'
-                    const modBg      = isSentinel ? 'bg-violet-500/5 border-violet-500/15' : isHarsh ? 'bg-red-500/5 border-red-500/15' : 'bg-cyan-500/5 border-cyan-500/15'
-                    const modIcon    = isSentinel ? 'Shield' : isHarsh ? 'AlertOctagon' : 'Navigation2'
-                    const modLabel   = isSentinel ? 'Sentinel AI' : isHarsh ? 'Harsh Event' : r.module === 'performance' ? 'Performance' : 'RouteMind AI'
-                    return (
-                      <div key={r.id || i} className={`p-3 rounded-xl border ${modBg}`}>
-                        <div className="flex items-center gap-2 mb-2">
-                          <Icon name={modIcon} size={11} className={modColor} />
-                          <span className={`text-2xs font-bold uppercase tracking-wider ${modColor}`}>{modLabel}</span>
-                          {r.alertLevel === 'danger' && <span className="text-2xs px-1.5 py-0.5 rounded bg-red-500/15 border border-red-500/25 text-red-400 font-bold">CRITICAL</span>}
-                          {r.alertLevel === 'warn'   && <span className="text-2xs px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/20 text-amber-400 font-semibold">WARN</span>}
-                          <span className="text-2xs text-slate-600 font-mono ml-auto">{new Date(r.ts).toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit' })}</span>
-                        </div>
-                        <div className="flex items-center gap-2 mb-2 flex-wrap">
-                          {r.driverName && <span className="text-2xs text-white font-semibold flex items-center gap-1"><Icon name="User" size={9} className="text-slate-600" />{r.driverName}</span>}
-                          {r.vehicleReg && <span className="text-2xs text-slate-400 font-mono flex items-center gap-1"><Icon name="Truck" size={9} className="text-slate-600" />{r.vehicleReg}</span>}
-                        </div>
-                        <div className="flex flex-wrap gap-1.5 mb-2">
-                          {r.fatigueScore  != null && <span className={`text-2xs px-2 py-0.5 rounded-full border font-semibold ${r.fatigueScore > 70 ? 'bg-red-500/10 border-red-500/20 text-red-400' : r.fatigueScore > 40 ? 'bg-amber-500/10 border-amber-500/20 text-amber-400' : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'}`}>Fatigue {r.fatigueScore}%</span>}
-                          {r.safetyScore   != null && <span className="text-2xs px-2 py-0.5 rounded-full border bg-violet-500/10 border-violet-500/20 text-violet-300 font-semibold">Safety {r.safetyScore}%</span>}
-                          {r.speed         != null && <span className={`text-2xs px-2 py-0.5 rounded-full border font-mono ${r.speed > 100 ? 'bg-red-500/10 border-red-500/20 text-red-400' : 'bg-slate-800/60 border-slate-700 text-slate-400'}`}>{r.speed} km/h</span>}
-                          {r.sessionMinutes!= null && <span className="text-2xs px-2 py-0.5 rounded-full border bg-slate-800/60 border-slate-700 text-slate-500">{Math.floor(r.sessionMinutes/60)}h {r.sessionMinutes%60}m shift</span>}
-                          {r.fuelEfficiency!= null && <span className="text-2xs px-2 py-0.5 rounded-full border bg-cyan-500/10 border-cyan-500/20 text-cyan-400">{r.fuelEfficiency} L/100km</span>}
-                          {r.routeAdherence!= null && <span className="text-2xs px-2 py-0.5 rounded-full border bg-emerald-500/10 border-emerald-500/20 text-emerald-400">Route {r.routeAdherence}%</span>}
-                        </div>
-                        {r.summary   && <div className="text-xs text-slate-300 leading-relaxed">{r.summary}</div>}
-                        {r.question  && <div className="text-2xs text-slate-500 italic mt-1">Driver query: “{r.question}”</div>}
-                        {r.destination && <div className="text-2xs text-slate-600 mt-1 flex items-center gap-1"><Icon name="MapPin" size={9} />→ {r.destination}</div>}
-                      </div>
-                    )
-                  })}
-                </div>
-                <div className="flex justify-end">
-                  <button onClick={() => { try { localStorage.removeItem('apex:db:driver_ai_reports') } catch {} window.location.reload() }}
-                    className="text-2xs text-slate-700 hover:text-red-400 flex items-center gap-1 transition-colors">
-                    <Icon name="Trash2" size={10} /> Clear reports
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-
-// ─── Dashboard ────────────────────────────────────────────────
-
-// ══════════════════════════════════════════════════════════════
-//  DRIVER SYNC SECTION — Full bidirectional Fleet ↔ Driver bridge
-//  Sync code generation, QR, share methods, live driver map,
-//  fleet commands, AI agent feedback loop.
-// ══════════════════════════════════════════════════════════════
-
-// ─── Driver icon for sync panel status dot ────────────────────
 function DriverOnlineDot({ online }) {
   return (
     <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${
@@ -1420,6 +998,66 @@ function DriverSyncSection({ drivers = [], vehicles = [] }) {
 }
 
 
+
+// ─── Driver App Summary Card (Dashboard widget) ───────────────
+function DriverAppSummaryCard({ drivers }) {
+  const [telemetryCount, setTelemetryCount] = useState(0)
+  const [msgCount,       setMsgCount]       = useState(0)
+  const [activeCodes,    setActiveCodes]    = useState(() => getActivePairingCodes())
+  const navigate = useNavigate()
+
+  useEffect(() => {
+    const u1 = listenForDriverTelemetry(() => setTelemetryCount(n => n + 1))
+    const u2 = listenForDriverMessages(m => { if (m.from === 'driver') setMsgCount(n => n + 1) })
+    const u3 = listenForPairingEvents(() => setActiveCodes(getActivePairingCodes()))
+    return () => { u1(); u2(); u3() }
+  }, [])
+
+  const paired  = activeCodes.filter(c => c.paired).length
+  const pending = activeCodes.filter(c => !c.paired && new Date(c.expires_at) > new Date()).length
+
+  return (
+    <div className="bg-[#0d1426] border border-violet-500/20 rounded-xl p-5">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2.5">
+          <div className="w-7 h-7 rounded-lg bg-violet-500/10 border border-violet-500/20 flex items-center justify-center">
+            <Icon name="Smartphone" size={14} className="text-violet-400" />
+          </div>
+          <div>
+            <span className="text-sm font-semibold text-white">AP3X Driver App</span>
+            <p className="text-2xs text-slate-500 mt-0.5">Set up, pair and monitor driver devices</p>
+          </div>
+        </div>
+        <button
+          onClick={() => navigate(ROUTES.DRIVER_SETUP)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-violet-300 bg-violet-500/10 border border-violet-500/20 hover:bg-violet-500/20 transition-all"
+        >
+          <Icon name="ArrowRight" size={12} /> Open
+        </button>
+      </div>
+      <div className="grid grid-cols-3 gap-3">
+        {[
+          { label: 'Paired',    val: paired,         icon: 'Link',          color: paired > 0  ? 'text-emerald-400' : 'text-slate-600' },
+          { label: 'Pending',   val: pending,        icon: 'Clock',         color: pending > 0 ? 'text-amber-400'  : 'text-slate-600' },
+          { label: 'New Msgs',  val: msgCount,       icon: 'MessageSquare', color: msgCount > 0 ? 'text-violet-400' : 'text-slate-600' },
+        ].map(s => (
+          <div key={s.label} className="bg-slate-900/40 rounded-lg p-3 text-center">
+            <Icon name={s.icon} size={14} className={`${s.color} mx-auto mb-1`} />
+            <div className={`font-mono text-lg font-bold ${s.color}`}>{s.val}</div>
+            <div className="text-2xs text-slate-600">{s.label}</div>
+          </div>
+        ))}
+      </div>
+      <button
+        onClick={() => navigate(ROUTES.DRIVER_SETUP)}
+        className="mt-4 w-full flex items-center justify-center gap-2 py-2.5 rounded-lg border border-violet-500/20 bg-violet-500/5 hover:bg-violet-500/10 text-xs font-semibold text-violet-300 transition-all"
+      >
+        <Icon name="KeyRound" size={13} /> Generate Driver Code &amp; Set Up Driver App
+      </button>
+    </div>
+  )
+}
+
 export default function Dashboard() {
   const navigate = useNavigate()
   const { vehicles } = useFleetStore(s => ({ vehicles: s.vehicles }))
@@ -1709,19 +1347,19 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* Driver App Panel */}
-        <DriverSyncSection drivers={drivers} vehicles={vehicles} />
+        {/* Driver App — slim summary card */}
+        <DriverAppSummaryCard drivers={drivers} />
 
         {/* Quick actions */}
         <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
           {[
+            { label: 'Set Driver Up',      icon: 'Smartphone',     color: 'text-violet-400',  route: ROUTES.DRIVER_SETUP },
             { label: 'New Dispatch Job',   icon: 'Radio',          color: 'text-cyan-400',    route: ROUTES.DISPATCH    },
             { label: 'Report Incident',    icon: 'FileText',       color: 'text-red-400',     route: ROUTES.INCIDENTS   },
             { label: 'Safety AI',          icon: 'ShieldAlert',    color: 'text-amber-400',   route: ROUTES.SAFETY      },
             { label: 'Compliance AI',      icon: 'ClipboardCheck', color: 'text-emerald-400', route: ROUTES.COMPLIANCE  },
             { label: 'AI Intelligence',    icon: 'Brain',          color: 'text-violet-400',  route: ROUTES.AI          },
             { label: 'Live Fleet Map',     icon: 'Map',            color: 'text-cyan-400',    route: ROUTES.NAVIGATION  },
-            { label: 'Analytics',          icon: 'BarChart3',      color: 'text-violet-400',  route: ROUTES.ANALYTICS   },
             { label: 'Fleet Control',      icon: 'Truck',          color: 'text-slate-400',   route: ROUTES.FLEET       },
           ].map(a => (
             <button key={a.label} onClick={() => navigate(a.route)}
