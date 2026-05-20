@@ -326,9 +326,14 @@ export function getDriverMessageHistory(limit = 80) {
 const CODE_KEY    = 'apex:fleet:pairing_codes'   // fleet side
 const PAIRED_KEY  = 'apex:driver:fleet_paired'   // driver side
 
-/** Fleet: generate a 6-digit time-limited pairing code for a driver */
+/** Fleet: generate an APEX-XXXXXXXX-XXXX-DA time-limited pairing code for a driver.
+ *  Format: APEX-{8 HEX}-{4 HEX}-DA  (DA = Driver App)
+ *  Passes regex: /^APEX-[A-F0-9]{8}-[A-F0-9]{4}-[A-Z]{2,4}$/
+ */
 export function generatePairingCode(driverId, driverName, vehicleReg, validMinutes = 60) {
-  const code    = Math.floor(100000 + Math.random() * 900000).toString()
+  const a    = crypto.randomUUID().replace(/-/g, '').substring(0, 8).toUpperCase()
+  const b    = crypto.randomUUID().replace(/-/g, '').substring(0, 4).toUpperCase()
+  const code = `APEX-${a}-${b}-DA`
   const expires = Date.now() + validMinutes * 60 * 1000
   const entry   = { code, driverId, driverName, vehicleReg, expires, created: Date.now() }
   try {
@@ -357,19 +362,27 @@ export function revokePairingCode(code) {
   } catch {}
 }
 
+// Code format regex — matches APEX-XXXXXXXX-XXXX-DA
+const DRIVER_CODE_REGEX = /^APEX-[A-F0-9]{8}-[A-F0-9]{4}-DA$/
+
 /**
- * Driver: validate a pairing code entered by the driver.
+ * Driver: validate an APEX-XXXXXXXX-XXXX-DA pairing code entered by the driver.
  * Returns { ok, driverId, driverName, vehicleReg } or { ok: false, error }
  * Works on same device (localStorage) or cross-device via BroadcastChannel reply.
  */
 export function validatePairingCode(code) {
+  const cleaned = (code || '').trim().toUpperCase()
+  // Format validation first
+  if (!DRIVER_CODE_REGEX.test(cleaned)) {
+    return { ok: false, error: 'Invalid code format. Code must be APEX-XXXXXXXX-XXXX-DA' }
+  }
   // Same-device check (fleet dashboard open on same browser)
   try {
     const all = JSON.parse(localStorage.getItem(CODE_KEY) || '[]')
-    const entry = all.find(e => e.code === code && e.expires > Date.now())
+    const entry = all.find(e => e.code === cleaned && e.expires > Date.now())
     if (entry) {
       // Mark code as used
-      localStorage.setItem(CODE_KEY, JSON.stringify(all.filter(e => e.code !== code)))
+      localStorage.setItem(CODE_KEY, JSON.stringify(all.filter(e => e.code !== cleaned)))
       // Save pairing on driver side
       localStorage.setItem(PAIRED_KEY, JSON.stringify({
         driverId:   entry.driverId,
@@ -386,7 +399,7 @@ export function validatePairingCode(code) {
       return { ok: true, driverId: entry.driverId, driverName: entry.driverName, vehicleReg: entry.vehicleReg }
     }
   } catch {}
-  return { ok: false, error: 'Invalid or expired code. Ask fleet ops for a new one.' }
+  return { ok: false, error: 'Code not found or expired. Ask fleet ops for a new one.' }
 }
 
 /** Driver: get current pairing (if any) */

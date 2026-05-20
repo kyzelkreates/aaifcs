@@ -431,7 +431,7 @@ function DriverAppPanel({ drivers, vehicles }) {
             <div className="flex items-start gap-3 p-3 rounded-xl bg-amber-500/5 border border-amber-500/20">
               <Icon name="ShieldAlert" size={14} className="text-amber-400 flex-shrink-0 mt-0.5" />
               <div className="text-xs text-slate-400 leading-relaxed">
-                Generate a <span className="text-white font-semibold">6-digit code</span> and give it to the driver verbally or via SMS. <span className="text-amber-300">Never share the fleet dashboard URL</span> — drivers access the AP3X Driver app only via the code.
+                Generate a unique <span className="font-mono text-violet-300">APEX-…-DA</span> driver pairing code and share it with the driver. <span className="text-amber-300">Never share the fleet dashboard URL.</span> Drivers use their own separate AP3X Driver app — no access to fleet management.
               </div>
             </div>
 
@@ -447,7 +447,7 @@ function DriverAppPanel({ drivers, vehicles }) {
               <div className="flex items-end">
                 <button onClick={generateCode}
                   className="w-full flex items-center justify-center gap-2 py-2 rounded-lg bg-violet-500/15 border border-violet-500/30 text-violet-300 text-xs font-semibold hover:bg-violet-500/25 transition-colors">
-                  <Icon name="KeyRound" size={13} /> Generate 6-Digit Code
+                  <Icon name="KeyRound" size={13} /> Generate Driver Code
                 </button>
               </div>
             </div>
@@ -455,9 +455,13 @@ function DriverAppPanel({ drivers, vehicles }) {
             {pairingCode && (
               <div className="flex flex-col items-center gap-4 p-5 bg-[#060b18] border border-violet-500/25 rounded-xl">
                 {/* Code */}
-                <div className="text-2xs text-slate-500 uppercase tracking-widest font-semibold">AP3X Pairing Code</div>
-                <div className="text-5xl font-mono font-bold tracking-[0.3em] text-white select-all px-4 py-3 bg-slate-900/60 rounded-2xl border border-violet-500/20">
-                  {pairingCode}
+                <div className="text-2xs text-slate-500 uppercase tracking-widest font-semibold">AP3X Driver Pairing Code</div>
+                {/* APEX-XXXXXXXX-XXXX-DA displayed in two rows for readability */}
+                <div className="w-full bg-slate-950/80 border border-violet-500/20 rounded-2xl px-4 py-4 text-center select-all">
+                  <div className="text-2xs text-slate-600 uppercase tracking-[0.25em] mb-2 font-semibold">Driver Pairing Code</div>
+                  <div className="font-mono font-bold text-violet-200 text-lg sm:text-xl tracking-[0.15em] leading-relaxed break-all">
+                    {pairingCode?.split('').join('​')}
+                  </div>
                 </div>
                 {codeExpiry && (
                   <div className="text-2xs text-slate-500">Valid 60 min · expires {codeExpiry.toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit' })}</div>
@@ -492,7 +496,7 @@ function DriverAppPanel({ drivers, vehicles }) {
                 </div>
 
                 <div className="text-2xs text-slate-700 text-center leading-relaxed">
-                  Driver opens AP3X app → enters code → paired instantly
+                  Driver opens AP3X Driver app → enters the full APEX-…-DA code → paired instantly
                 </div>
               </div>
             )}

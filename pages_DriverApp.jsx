@@ -448,7 +448,7 @@ function SetupScreen({ onReady }) {
   const [checking, setChecking] = useState(false)
 
   const submitCode = () => {
-    if (code.length !== 6) return setErr('Enter the 6-digit code from fleet ops')
+    if (!/^APEX-[A-F0-9]{8}-[A-F0-9]{4}-DA$/.test(code.trim().toUpperCase())) return setErr('Enter your full APEX-…-DA driver pairing code')
     setChecking(true); setErr('')
     const result = validatePairingCode(code.trim())
     setChecking(false)
@@ -491,24 +491,25 @@ function SetupScreen({ onReady }) {
             <div className="flex items-start gap-3 p-3 rounded-xl bg-violet-500/5 border border-violet-500/20">
               <Icon name="ShieldCheck" size={16} className="text-violet-400 flex-shrink-0 mt-0.5" />
               <div className="text-xs text-slate-400 leading-relaxed">
-                Ask your fleet manager for a <span className="text-violet-300 font-semibold">6-digit pairing code</span>. This links your device to the fleet without giving access to fleet systems.
+                Ask your fleet manager for your <span className="text-violet-300 font-semibold">driver pairing code</span>.
+                It looks like <span className="font-mono text-violet-400">APEX-XXXXXXXX-XXXX-DA</span>. This links your device to the fleet — no access to fleet management systems.
               </div>
             </div>
             <div>
-              <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">Fleet Pairing Code</label>
+              <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">Driver Pairing Code</label>
               <input
                 value={code}
-                onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                placeholder="000000"
-                type="text" inputMode="numeric" maxLength={6} autoFocus
+                onChange={e => setCode(e.target.value.toUpperCase().replace(/[^A-F0-9-]/g, '').slice(0, 22))}
+                placeholder="APEX-XXXXXXXX-XXXX-DA"
+                type="text" autoCapitalize="characters" autoFocus
                 onKeyDown={e => e.key === 'Enter' && submitCode()}
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-3 text-2xl text-[#4a4f5a] placeholder-slate-800 focus:border-violet-500 focus:outline-none font-mono tracking-[0.5em] text-center"
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-3 text-sm text-violet-300 placeholder-slate-800 focus:border-violet-500 focus:outline-none font-mono tracking-wider text-center"
               />
             </div>
             {err && <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{err}</div>}
-            <button onClick={submitCode} disabled={code.length !== 6 || checking}
+            <button onClick={submitCode} disabled={!code.match(/^APEX-[A-F0-9]{8}-[A-F0-9]{4}-DA$/) || checking}
               className="w-full bg-violet-500 hover:bg-violet-600 disabled:opacity-40 text-white font-semibold rounded-xl py-3 text-sm transition-colors">
-              {checking ? 'Verifying…' : 'Verify Code'}
+              {checking ? 'Verifying…' : 'Connect to Fleet'}
             </button>
           </div>
         ) : (
@@ -538,7 +539,7 @@ function SetupScreen({ onReady }) {
             </button>
           </div>
         )}
-        <p className="text-center text-2xs text-slate-700">AP3X Driver · Secured by fleet pairing code · No fleet dashboard access</p>
+        <p className="text-center text-2xs text-slate-700">AP3X Driver · Secured by Apex pairing code · Isolated from fleet management</p>
       </div>
     </div>
   )
@@ -586,246 +587,13 @@ function LoginScreen({ profile, onLogin, onReset }) {
   )
 }
 
-// ══════════════════════════════════════════════════════════════
-//  FLEET PORTAL LINK MODAL
-//  First time per session: driver enters their 6-digit pairing code to
-//  link to the fleet dashboard. Connection is saved permanently to their
-//  profile (localStorage). On subsequent sessions, shows saved connection
-//  + Open Portal button. Re-openable from the "Portal" top bar button.
-//
-//  SECURITY: driver gets a view-only link. They cannot access fleet mgmt.
-// ══════════════════════════════════════════════════════════════
-const SESSION_PORTAL_SHOWN = 'apex:session:portal_shown'
-const DRIVER_PORTAL_KEY    = 'apex:driver:portal_link'   // persisted per device
-
-// Derive a safe fleet portal URL — routes to the AP3X driver view only
-function buildPortalUrl(pairing) {
-  const base = window.location.origin
-  // Opens the fleet dashboard at the AP3X page with the driver's ID pre-filled
-  // Fleet can see the driver's position and telemetry — driver cannot manage fleet
-  return `${base}/#/ap3x?driver=${encodeURIComponent(pairing.driverId)}&reg=${encodeURIComponent(pairing.vehicleReg || '')}&view=driver`
-}
-
-function FleetPortalModal({ profile, onClose }) {
-  // Persistent saved pairing for this portal
-  const [saved,   setSaved]   = useState(() => {
-    try { return JSON.parse(localStorage.getItem(DRIVER_PORTAL_KEY) || 'null') } catch { return null }
-  })
-  const [step,    setStep]    = useState(saved ? 'linked' : 'enter')  // 'enter' | 'verifying' | 'linked'
-  const [code,    setCode]    = useState('')
-  const [err,     setErr]     = useState('')
-  const [copied,  setCopied]  = useState(false)
-
-  const submitCode = () => {
-    if (code.length !== 6) { setErr('Enter the full 6-digit code from fleet ops'); return }
-    setErr('')
-    setStep('verifying')
-
-    setTimeout(() => {
-      const result = validatePairingCode(code.trim())
-      if (!result.ok) {
-        setErr(result.error)
-        setStep('enter')
-        return
-      }
-      // Save permanently to device — this driver always has this fleet link
-      const pairing = {
-        driverId:   result.driverId   || profile.id,
-        driverName: result.driverName || profile.full_name,
-        vehicleReg: result.vehicleReg || profile.vehicle_reg,
-        linked_at:  new Date().toISOString(),
-        portalUrl:  buildPortalUrl(result),
-      }
-      localStorage.setItem(DRIVER_PORTAL_KEY, JSON.stringify(pairing))
-      setSaved(pairing)
-      setStep('linked')
-    }, 600)
-  }
-
-  const openPortal = () => {
-    if (saved?.portalUrl) window.open(saved.portalUrl, '_blank', 'noopener,noreferrer')
-  }
-
-  const copyLink = () => {
-    const url = saved?.portalUrl || ''
-    navigator.clipboard.writeText(url).catch(() => {
-      const ta = document.createElement('textarea')
-      ta.value = url; document.body.appendChild(ta); ta.select()
-      document.execCommand('copy'); document.body.removeChild(ta)
-    }).finally(() => { setCopied(true); setTimeout(() => setCopied(false), 2000) })
-    setCopied(true); setTimeout(() => setCopied(false), 2000)
-  }
-
-  const unlink = () => {
-    localStorage.removeItem(DRIVER_PORTAL_KEY)
-    setSaved(null); setStep('enter'); setCode(''); setErr('')
-  }
-
-  return (
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/85 backdrop-blur-sm p-4">
-      <div className="w-full max-w-sm bg-[#0d1426] border border-violet-500/30 rounded-2xl shadow-2xl overflow-hidden">
-
-        {/* ── Header ── */}
-        <div className="px-5 pt-5 pb-4 border-b border-slate-800/50 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-violet-500/15 border border-violet-500/20 flex items-center justify-center flex-shrink-0">
-              <Icon name={step === 'linked' ? 'ShieldCheck' : 'Link2'} size={16} className="text-violet-400" />
-            </div>
-            <div>
-              <div className="text-sm font-bold text-white">Fleet Control Portal</div>
-              <div className="text-2xs text-slate-500">
-                {step === 'linked' ? 'Connected to fleet dashboard' : 'Link your device to fleet'}
-              </div>
-            </div>
-          </div>
-          <button onClick={onClose} className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-600 hover:text-white hover:bg-slate-800 transition-colors">
-            <Icon name="X" size={14} />
-          </button>
-        </div>
-
-        <div className="p-5 space-y-4">
-
-          {/* ── ENTER CODE STEP ── */}
-          {(step === 'enter' || step === 'verifying') && (<>
-
-            {/* Info banner */}
-            <div className="flex items-start gap-2.5 p-3 rounded-xl bg-violet-500/6 border border-violet-500/15">
-              <Icon name="Info" size={13} className="text-violet-400 flex-shrink-0 mt-0.5" />
-              <p className="text-2xs text-slate-400 leading-relaxed">
-                Enter the <span className="text-violet-300 font-semibold">6-digit code</span> from your fleet manager.
-                This connects your driver app to the fleet dashboard — you'll get a personal portal link saved to this device permanently.
-              </p>
-            </div>
-
-            {/* Driver identity */}
-            <div className="flex items-center gap-2.5 p-3 rounded-xl bg-slate-900/60 border border-slate-800/50">
-              <div className="w-8 h-8 rounded-lg bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center flex-shrink-0">
-                <Icon name="User" size={13} className="text-cyan-400" />
-              </div>
-              <div className="min-w-0">
-                <div className="text-xs font-semibold text-white truncate">{profile.full_name}</div>
-                <div className="text-2xs text-slate-500 font-mono">{profile.vehicle_reg}</div>
-              </div>
-            </div>
-
-            {/* Code input */}
-            <div>
-              <label className="text-2xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">
-                Fleet Pairing Code
-              </label>
-              <input
-                value={code}
-                onChange={e => { setCode(e.target.value.replace(/\D/g,'').slice(0,6)); setErr('') }}
-                onKeyDown={e => e.key === 'Enter' && submitCode()}
-                placeholder="000000"
-                type="text" inputMode="numeric" maxLength={6} autoFocus
-                disabled={step === 'verifying'}
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 text-2xl font-mono tracking-[0.5em] text-center text-white placeholder-slate-800 focus:border-violet-500 focus:outline-none disabled:opacity-50"
-              />
-            </div>
-
-            {err && (
-              <div className="flex items-center gap-2 p-2.5 rounded-lg bg-red-500/10 border border-red-500/20">
-                <Icon name="AlertCircle" size={12} className="text-red-400 flex-shrink-0" />
-                <span className="text-2xs text-red-400">{err}</span>
-              </div>
-            )}
-
-            <button
-              onClick={submitCode}
-              disabled={code.length !== 6 || step === 'verifying'}
-              className="w-full flex items-center justify-center gap-2 bg-violet-500 hover:bg-violet-600 disabled:opacity-40 text-white font-semibold rounded-xl py-3 text-sm transition-colors">
-              {step === 'verifying'
-                ? <><Icon name="Loader2" size={14} className="animate-spin" /> Verifying…</>
-                : <><Icon name="Link2" size={14} /> Connect to Fleet</>
-              }
-            </button>
-          </>)}
-
-          {/* ── LINKED STEP ── */}
-          {step === 'linked' && saved && (<>
-
-            {/* Success badge */}
-            <div className="flex items-center gap-2.5 p-3 rounded-xl bg-emerald-500/8 border border-emerald-500/20">
-              <Icon name="CheckCircle2" size={16} className="text-emerald-400 flex-shrink-0" />
-              <div>
-                <div className="text-xs font-semibold text-emerald-300">Fleet connection active</div>
-                <div className="text-2xs text-slate-500">
-                  Linked {new Date(saved.linked_at).toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' })}
-                </div>
-              </div>
-            </div>
-
-            {/* Pairing details */}
-            <div className="space-y-2">
-              <div className="flex items-center gap-2.5 p-3 rounded-xl bg-slate-900/60 border border-slate-800/50">
-                <Icon name="User" size={13} className="text-cyan-400 flex-shrink-0" />
-                <div className="min-w-0 flex-1">
-                  <div className="text-xs font-semibold text-white truncate">{saved.driverName}</div>
-                  <div className="text-2xs text-slate-500 font-mono">{saved.vehicleReg}</div>
-                </div>
-                <div className="w-2 h-2 rounded-full bg-emerald-400 flex-shrink-0" />
-              </div>
-
-              {/* Portal URL display */}
-              <div className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5">
-                <div className="text-2xs text-slate-600 mb-1 font-semibold uppercase tracking-wider">Your Portal Link</div>
-                <div className="text-2xs text-violet-300 font-mono break-all leading-relaxed">{saved.portalUrl}</div>
-              </div>
-            </div>
-
-            {/* Action buttons */}
-            <div className="grid grid-cols-2 gap-2">
-              <button onClick={copyLink}
-                className={`flex items-center justify-center gap-1.5 py-2.5 rounded-xl border text-xs font-semibold transition-all ${
-                  copied ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
-                         : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-white hover:border-slate-600'
-                }`}>
-                <Icon name={copied ? 'CheckCircle2' : 'Copy'} size={12} />
-                {copied ? 'Copied!' : 'Copy Link'}
-              </button>
-              <button onClick={openPortal}
-                className="flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-violet-500 hover:bg-violet-600 text-white text-xs font-semibold transition-colors">
-                <Icon name="ExternalLink" size={12} />
-                Open Portal
-              </button>
-            </div>
-
-            {/* Unlink option */}
-            <button onClick={unlink}
-              className="w-full text-2xs text-slate-700 hover:text-red-400 transition-colors py-1 text-center">
-              Unlink from this fleet
-            </button>
-          </>)}
-
-        </div>
-
-        {/* Footer */}
-        <div className="px-5 pb-4 pt-0">
-          <button onClick={onClose}
-            className="w-full py-2 text-2xs text-slate-700 hover:text-slate-500 transition-colors">
-            Close
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
 
 // ══════════════════════════════════════════════════════════════
 //  MAIN DRIVER APP
 // ══════════════════════════════════════════════════════════════
 function DriverAppMain({ profile, onLogout }) {
 
-  // ── Fleet Portal Modal — shown once per session after login ──
-  const [showPortal, setShowPortal] = useState(() => {
-    // Only show if not already seen this browser session
-    return !sessionStorage.getItem(SESSION_PORTAL_SHOWN)
-  })
-  const closePortal = () => {
-    sessionStorage.setItem(SESSION_PORTAL_SHOWN, '1')
-    setShowPortal(false)
-  }
+  // Fleet portal modal removed — driver app is fully isolated from fleet dashboard
 
   // ── Apex Command Center Bridge (additive — no existing logic changes) ─
   const apexBridgeRef = useRef(null)
@@ -1496,8 +1264,7 @@ function DriverAppMain({ profile, onLogout }) {
       className="h-screen w-screen bg-[#060b18] flex flex-col overflow-hidden text-white"
       style={{ WebkitUserSelect: 'none', userSelect: 'none' }}>
 
-      {/* Fleet Portal Modal — shown once per session right after login */}
-      {showPortal && <FleetPortalModal profile={profile} onClose={closePortal} />}
+
 
       {/* ── Top Bar ──────────────────────────────────────────── */}
       <div className="flex items-center gap-2 px-3 py-2 bg-[#0d1426] border-b border-violet-500/15 flex-shrink-0">
@@ -1552,23 +1319,16 @@ function DriverAppMain({ profile, onLogout }) {
           gpsState === 'denied' ? 'bg-red-400' : 'bg-amber-400'
         }`} />
 
-        {/* Fleet Portal button — green dot when linked, amber when not */}
+        {/* Fleet pairing status indicator — read-only, no navigation to fleet */}
         {(() => {
-          let linked = false
-          try { linked = !!JSON.parse(localStorage.getItem('apex:driver:portal_link') || 'null') } catch {}
-          return (
-            <button
-              onClick={() => setShowPortal(true)}
-              className={`flex items-center gap-1 px-2 py-1 rounded-lg border text-2xs font-semibold transition-colors ${
-                linked
-                  ? 'border-emerald-500/30 bg-emerald-500/8 text-emerald-400 hover:bg-emerald-500/15'
-                  : 'border-amber-500/25 bg-amber-500/8 text-amber-400 hover:bg-amber-500/15'
-              }`}
-              title={linked ? 'Fleet portal linked — tap to open' : 'Tap to link fleet portal'}>
-              <Icon name={linked ? 'ShieldCheck' : 'Link2'} size={11} />
-              <span>Portal</span>
-            </button>
-          )
+          let paired = false
+          try { paired = !!JSON.parse(localStorage.getItem('apex:driver:fleet_paired') || 'null') } catch {}
+          return paired ? (
+            <div className="flex items-center gap-1 px-2 py-1 rounded-lg border border-emerald-500/20 bg-emerald-500/6 text-2xs text-emerald-400">
+              <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span>Fleet Linked</span>
+            </div>
+          ) : null
         })()}
 
         {/* Fullscreen toggle — native listener via ref, bypasses React synthetic events */}
