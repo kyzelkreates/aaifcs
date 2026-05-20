@@ -25,6 +25,10 @@ import { useMapStore, useFleetStore } from './core_storage'
 import { mapService } from './services_maps_mapService'
 import { fleetService } from './services_fleet_fleetService'
 import { formatDistance, formatDuration } from './utils_format'
+import {
+  subscribeToDriverLocations, getLiveDriverPositions,
+} from './services_sync_liveSync'
+
 
 // Lazy-load map to avoid SSR issues with Leaflet
 const ApexMap = lazy(() => import('./modules_navigation_ApexMap'))
@@ -305,6 +309,7 @@ export default function Navigation() {
   const mapRef             = useRef(null)
   const [selectedVehicle,  setSelectedVehicle]  = useState(null)
   const [mapMarkers,       setMapMarkers]        = useState([])
+  const [liveDrivers,   setLiveDrivers]       = useState(() => getLiveDriverPositions())
   const [mapRoutes,        setMapRoutes]         = useState([])
   const [flyTarget,        setFlyTarget]         = useState(null)
   const navigate = useNavigate()
@@ -312,9 +317,9 @@ export default function Navigation() {
 
   useEffect(() => { fleetService.fetchVehicles() }, [])
 
-  // Build markers from fleet vehicles
+  // Build markers from fleet vehicles + live driver positions
   useEffect(() => {
-    const markers = vehicles.map(v => ({
+    const vehicleMarkers = vehicles.map(v => ({
       id:       v.id,
       lat:      v.lat,
       lng:      v.lng,
@@ -323,9 +328,49 @@ export default function Navigation() {
       status:   v.status,
       speed:    v.speed,
       fuel:     v.fuel_level,
+      _type:    'fleet',
     })).filter(m => m.lat != null && m.lng != null)
-    setMapMarkers(markers)
-  }, [vehicles])
+
+    // Merge live driver positions (override fleet vehicle if same vehicle_id)
+    const driverMarkers = liveDrivers.map(pos => {
+      const age = Date.now() - new Date(pos.ts).getTime()
+      if (age > 5 * 60 * 1000) return null // stale > 5min
+      return {
+        id:       `driver-${pos.vehicle_id}`,
+        lat:      pos.lat,
+        lng:      pos.lng,
+        label:    pos.vehicle_id || 'Driver',
+        sublabel: `${pos.speed ?? 0} km/h · Live`,
+        status:   'active',
+        speed:    pos.speed,
+        heading:  pos.heading,
+        _type:    'driver',
+        _live:    true,
+      }
+    }).filter(Boolean)
+
+    // Fleet markers where no live driver overrides
+    const liveVehicleIds = new Set(liveDrivers.map(p => p.vehicle_id))
+    const nonOverridden  = vehicleMarkers.filter(m => !liveVehicleIds.has(m.id))
+
+    setMapMarkers([...driverMarkers, ...nonOverridden])
+  }, [vehicles, liveDrivers])
+
+  // Subscribe to live driver location updates
+  useEffect(() => {
+    const unsub = subscribeToDriverLocations((payload) => {
+      if (payload._bulk) {
+        setLiveDrivers(payload.positions)
+      } else {
+        setLiveDrivers(prev => {
+          const idx = prev.findIndex(p => p.vehicle_id === payload.vehicle_id)
+          if (idx >= 0) { const n = [...prev]; n[idx] = payload; return n }
+          return [payload, ...prev]
+        })
+      }
+    })
+    return unsub
+  }, [])
 
   const handleRoute = useCallback((route, from, to) => {
     const coords = route?.geometry?.coordinates

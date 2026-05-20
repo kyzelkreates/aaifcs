@@ -32,6 +32,16 @@ import { complianceEngine } from './intel_complianceEngine'
 import { safetyEngine }     from './intel_safetyEngine'
 import { driverLearning }   from './intel_driverLearning'
 import { formatDateTime } from './utils_format'
+import {
+  generateSyncCode, getActiveSyncCodes, revokeSyncCode,
+  getSyncCodeQR, copySyncCode, shareSyncCodeWhatsApp,
+  shareSyncCodeEmail, shareSyncCodeNative,
+  subscribeToDriverLocations, subscribeToAIReports,
+  getStoredAIReports, getActiveDrivers, subscribeToDriverEvents,
+  sendFleetMessage, sendFleetAlert, sendDispatchOrder,
+  getLiveDriverPositions,
+} from './services_sync_liveSync'
+
 
 const ApexMap = lazy(() => import('./modules_navigation_ApexMap'))
 
@@ -659,6 +669,757 @@ function DriverAppPanel({ drivers, vehicles }) {
 
 
 // ─── Dashboard ────────────────────────────────────────────────
+
+// ══════════════════════════════════════════════════════════════
+//  DRIVER SYNC SECTION — Full bidirectional Fleet ↔ Driver bridge
+//  Sync code generation, QR, share methods, live driver map,
+//  fleet commands, AI agent feedback loop.
+// ══════════════════════════════════════════════════════════════
+
+// ─── Driver icon for sync panel status dot ────────────────────
+function DriverOnlineDot({ online }) {
+  return (
+    <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${
+      online ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]' : 'bg-slate-600'
+    }`} />
+  )
+}
+
+// ─── Sync code card ───────────────────────────────────────────
+function SyncCodeCard({ code, expiry, qr, driverName, vehicleReg, onRevoke, onCopy, copied }) {
+  const [timeLeft, setTimeLeft] = useState('')
+  useEffect(() => {
+    if (!expiry) return
+    const tick = () => {
+      const diff = new Date(expiry) - new Date()
+      if (diff <= 0) { setTimeLeft('Expired'); return }
+      const m = Math.floor(diff / 60000)
+      const s = Math.floor((diff % 60000) / 1000)
+      setTimeLeft(`${m}m ${s}s`)
+    }
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [expiry])
+
+  return (
+    <div className="bg-[#060b18] border border-violet-500/30 rounded-xl p-4 space-y-3">
+      {/* Code display */}
+      <div className="flex items-center gap-3">
+        <div className="flex-1 font-mono text-violet-300 text-sm bg-violet-500/5 border border-violet-500/20 rounded-lg px-3 py-2 tracking-widest select-all break-all">
+          {code}
+        </div>
+        <button
+          onClick={onCopy}
+          className={`flex-shrink-0 px-3 py-2 rounded-lg text-xs font-semibold transition-all ${
+            copied
+              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+              : 'bg-violet-500/15 text-violet-300 border border-violet-500/25 hover:bg-violet-500/25'
+          }`}
+        >
+          {copied ? '✓ Copied' : 'Copy'}
+        </button>
+        <button
+          onClick={onRevoke}
+          className="flex-shrink-0 p-2 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-500/10 border border-slate-700/40 transition-colors"
+          title="Revoke code"
+        >
+          <Icon name="X" size={14} />
+        </button>
+      </div>
+
+      {/* QR */}
+      {qr && (
+        <div className="flex gap-4 items-start">
+          <div className="rounded-lg overflow-hidden border border-violet-500/20 flex-shrink-0 bg-[#060b18] p-1">
+            <img src={qr.qrUrl} alt="Sync QR" width={96} height={96} className="block" />
+          </div>
+          <div className="flex-1 space-y-1.5 min-w-0">
+            <div className="flex items-center gap-1.5 text-xs text-slate-400">
+              <Icon name="User" size={11} className="text-slate-500 flex-shrink-0" />
+              <span className="truncate">{driverName}</span>
+            </div>
+            <div className="flex items-center gap-1.5 text-xs text-slate-400">
+              <Icon name="Truck" size={11} className="text-slate-500 flex-shrink-0" />
+              <span className="truncate">{vehicleReg}</span>
+            </div>
+            <div className="flex items-center gap-1.5 text-xs text-slate-500">
+              <Icon name="Clock" size={11} className="flex-shrink-0" />
+              <span>{timeLeft}</span>
+            </div>
+            <p className="text-2xs text-slate-600 leading-relaxed">
+              Scan QR or paste code in AP3X Driver App to connect
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Active driver row ────────────────────────────────────────
+function ActiveDriverRow({ driver, onMessage, onAlert }) {
+  const tel = driver.telemetry
+  const age = driver.last_seen
+    ? Math.floor((Date.now() - new Date(driver.last_seen).getTime()) / 1000)
+    : null
+  const online = age != null && age < 60
+
+  return (
+    <div className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-[#060b18] border border-slate-800/50 hover:border-slate-700/60 transition-colors">
+      <DriverOnlineDot online={online} />
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium text-white truncate">{driver.driver_name}</span>
+          <span className="text-2xs text-slate-600 bg-slate-800/60 px-1.5 py-0.5 rounded font-mono">{driver.vehicle_reg}</span>
+        </div>
+        {tel ? (
+          <div className="flex items-center gap-3 mt-0.5">
+            <span className="text-2xs text-cyan-400 font-mono">{tel.speed ?? 0} km/h</span>
+            <span className="text-2xs text-slate-500">
+              {tel.lat?.toFixed(4)}, {tel.lng?.toFixed(4)}
+            </span>
+            <span className="text-2xs text-slate-600">
+              {age != null ? (age < 60 ? `${age}s ago` : `${Math.floor(age/60)}m ago`) : '—'}
+            </span>
+          </div>
+        ) : (
+          <span className="text-2xs text-slate-600">No telemetry yet</span>
+        )}
+      </div>
+      <div className="flex items-center gap-1.5">
+        <button
+          onClick={() => onMessage(driver)}
+          className="p-1.5 rounded-md text-slate-500 hover:text-cyan-400 hover:bg-cyan-500/10 transition-colors"
+          title="Send message"
+        >
+          <Icon name="MessageSquare" size={13} />
+        </button>
+        <button
+          onClick={() => onAlert(driver)}
+          className="p-1.5 rounded-md text-slate-500 hover:text-amber-400 hover:bg-amber-500/10 transition-colors"
+          title="Send alert"
+        >
+          <Icon name="AlertTriangle" size={13} />
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ─── AI Report card ───────────────────────────────────────────
+function AIReportCard({ report }) {
+  const TYPE_CONFIG = {
+    sentinel:    { label: 'Sentinel AI', color: 'violet', icon: 'Shield' },
+    routemind:   { label: 'RouteMind AI', color: 'cyan',  icon: 'Navigation' },
+    harsh_event: { label: 'Harsh Event', color: 'red',    icon: 'AlertOctagon' },
+    performance: { label: 'Performance', color: 'emerald', icon: 'TrendingUp' },
+  }
+  const cfg = TYPE_CONFIG[report.type] || { label: 'AI Report', color: 'slate', icon: 'Cpu' }
+  const col = {
+    violet:  { bg: 'bg-violet-500/10',  border: 'border-violet-500/20',  text: 'text-violet-300'  },
+    cyan:    { bg: 'bg-cyan-500/10',    border: 'border-cyan-500/20',    text: 'text-cyan-300'    },
+    red:     { bg: 'bg-red-500/10',     border: 'border-red-500/20',     text: 'text-red-300'     },
+    emerald: { bg: 'bg-emerald-500/10', border: 'border-emerald-500/20', text: 'text-emerald-300' },
+    slate:   { bg: 'bg-slate-800/50',   border: 'border-slate-700/40',   text: 'text-slate-400'   },
+  }[cfg.color]
+
+  return (
+    <div className={`${col.bg} border ${col.border} rounded-lg p-3 space-y-1.5`}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5">
+          <Icon name={cfg.icon} size={12} className={col.text} />
+          <span className={`text-2xs font-semibold uppercase tracking-wider ${col.text}`}>{cfg.label}</span>
+        </div>
+        <span className="text-2xs text-slate-600 font-mono">
+          {new Date(report.ts).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+        </span>
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-xs text-slate-300 font-medium">{report.driver_name}</span>
+        <span className="text-2xs text-slate-600">{report.vehicle_reg}</span>
+      </div>
+      {report.data && (
+        <div className="flex gap-3 flex-wrap">
+          {report.data.fatigue_score   != null && <span className="text-2xs text-slate-400">Fatigue: <span className={report.data.fatigue_score > 70 ? 'text-red-400' : report.data.fatigue_score > 40 ? 'text-amber-400' : 'text-emerald-400'}>{report.data.fatigue_score}%</span></span>}
+          {report.data.safety_score    != null && <span className="text-2xs text-slate-400">Safety: <span className={report.data.safety_score  < 50 ? 'text-red-400' : report.data.safety_score  < 75 ? 'text-amber-400' : 'text-emerald-400'}>{report.data.safety_score}%</span></span>}
+          {report.data.speed           != null && <span className="text-2xs text-slate-400">Speed: <span className="text-slate-300">{report.data.speed} km/h</span></span>}
+          {report.data.route_adherence != null && <span className="text-2xs text-slate-400">Route: <span className="text-slate-300">{report.data.route_adherence}%</span></span>}
+          {report.data.fuel_efficiency != null && <span className="text-2xs text-slate-400">Fuel: <span className="text-slate-300">{report.data.fuel_efficiency} mpg</span></span>}
+          {report.data.event           != null && <span className="text-2xs text-red-300 font-semibold">{report.data.event}</span>}
+          {report.data.summary         != null && <span className="text-2xs text-slate-400 w-full">{report.data.summary}</span>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Main Driver Sync Section ─────────────────────────────────
+function DriverSyncSection({ drivers = [], vehicles = [] }) {
+  const [tab, setTab]                     = useState('sync')    // 'sync' | 'live' | 'commands' | 'ai'
+  const [syncCode, setSyncCode]           = useState('')
+  const [syncExpiry, setSyncExpiry]       = useState(null)
+  const [syncQR, setSyncQR]              = useState(null)
+  const [syncDriver, setSyncDriver]       = useState('')
+  const [syncDriverName, setSyncDriverName] = useState('')
+  const [syncVehicleReg, setSyncVehicleReg] = useState('')
+  const [activeCodes, setActiveCodes]     = useState(() => getActiveSyncCodes())
+  const [activeDrivers, setActiveDrivers] = useState(() => getActiveDrivers())
+  const [livePositions, setLivePositions] = useState(() => getLiveDriverPositions())
+  const [aiReports, setAIReports]         = useState(() => getStoredAIReports(30))
+  const [copied, setCopied]               = useState(false)
+  const [shareStatus, setShareStatus]     = useState(null)
+  const [cmdDriver, setCmdDriver]         = useState('')
+  const [cmdText, setCmdText]             = useState('')
+  const [cmdType, setCmdType]             = useState('message')
+  const [cmdSent, setCmdSent]             = useState(false)
+
+  // ── Subscribe to live events ───────────────────────────────
+  useEffect(() => {
+    const unsub = subscribeToDriverEvents((evt) => {
+      if (evt.type === 'DRIVER_PAIRED' || evt.type === 'CODE_CREATED' || evt.type === 'CODE_REVOKED') {
+        setActiveCodes(getActiveSyncCodes())
+        setActiveDrivers(getActiveDrivers())
+      }
+    })
+    return unsub
+  }, [])
+
+  useEffect(() => {
+    const unsub = subscribeToDriverLocations((payload) => {
+      if (payload._bulk) {
+        setLivePositions(payload.positions)
+      } else {
+        setLivePositions(prev => {
+          const idx = prev.findIndex(p => p.vehicle_id === payload.vehicle_id)
+          if (idx >= 0) { const n = [...prev]; n[idx] = payload; return n }
+          return [...prev, payload]
+        })
+      }
+      setActiveDrivers(getActiveDrivers())
+    })
+    return unsub
+  }, [])
+
+  useEffect(() => {
+    const unsub = subscribeToAIReports((report) => {
+      setAIReports(prev => [report, ...prev].slice(0, 100))
+    })
+    return unsub
+  }, [])
+
+  // ── Refresh every 10s ──────────────────────────────────────
+  useEffect(() => {
+    const id = setInterval(() => {
+      setActiveCodes(getActiveSyncCodes())
+      setActiveDrivers(getActiveDrivers())
+      setLivePositions(getLiveDriverPositions())
+    }, 10000)
+    return () => clearInterval(id)
+  }, [])
+
+  // ── Generate code ──────────────────────────────────────────
+  const handleGenerate = () => {
+    const driver = drivers?.find(d => d.id === syncDriver) || null
+    const name   = driver?.full_name || syncDriverName || 'Driver'
+    const reg    = driver?.vehicle_reg || driver?.license_plate || syncVehicleReg || '—'
+    const code   = generateSyncCode(syncDriver || null, name, reg, 60)
+    const qr     = getSyncCodeQR(code, 200)
+    setSyncCode(code)
+    setSyncDriverName(name)
+    setSyncVehicleReg(reg)
+    setSyncQR(qr)
+    setSyncExpiry(new Date(Date.now() + 60 * 60 * 1000).toISOString())
+    setActiveCodes(getActiveSyncCodes())
+    setShareStatus(null)
+    setCopied(false)
+  }
+
+  const handleCopy = async () => {
+    await copySyncCode(syncCode)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2500)
+  }
+
+  const handleShare = async (method) => {
+    setShareStatus({ method, state: 'busy' })
+    let res
+    if (method === 'whatsapp') {
+      shareSyncCodeWhatsApp(syncCode, syncDriverName, syncVehicleReg)
+      res = { ok: true }
+    } else if (method === 'email') {
+      shareSyncCodeEmail(syncCode, syncDriverName, syncVehicleReg)
+      res = { ok: true }
+    } else if (method === 'native') {
+      res = await shareSyncCodeNative(syncCode, syncDriverName, syncVehicleReg)
+    }
+    setShareStatus({ method, state: res?.ok ? 'ok' : 'fail', msg: res?.error })
+    setTimeout(() => setShareStatus(null), 3500)
+  }
+
+  const handleSendCommand = () => {
+    if (!cmdText.trim()) return
+    const targetId = cmdDriver || 'all'
+    if (cmdType === 'message') sendFleetMessage(targetId, cmdText.trim())
+    else if (cmdType === 'alert') sendFleetAlert(targetId, cmdText.trim(), 'warning')
+    else if (cmdType === 'dispatch') sendDispatchOrder(targetId, { description: cmdText.trim(), ts: new Date().toISOString() })
+    setCmdSent(true)
+    setCmdText('')
+    setTimeout(() => setCmdSent(false), 2000)
+  }
+
+  const TABS = [
+    { key: 'sync',     label: 'Sync Code',   icon: 'LinkIcon'      },
+    { key: 'live',     label: 'Live Drivers', icon: 'Radio',        badge: livePositions.length || null },
+    { key: 'commands', label: 'Commands',     icon: 'Send'          },
+    { key: 'ai',       label: 'AI Reports',   icon: 'Cpu',          badge: aiReports.length || null },
+  ]
+
+  return (
+    <div className="bg-[#0d1426] border border-violet-500/20 rounded-xl overflow-hidden">
+      {/* ── Header ── */}
+      <div className="flex items-center justify-between px-4 sm:px-5 py-3.5 border-b border-slate-800/60">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-lg bg-violet-500/15 border border-violet-500/25 flex items-center justify-center flex-shrink-0">
+            <Icon name="Wifi" size={15} className="text-violet-400" />
+          </div>
+          <div>
+            <h2 className="text-sm font-bold text-white font-display">Driver Sync</h2>
+            <p className="text-2xs text-slate-500">Fleet ↔ Driver App live bridge</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-2xs text-slate-600 bg-slate-800/60 px-2 py-1 rounded-md font-mono">
+            {livePositions.length} live · {activeCodes.length} codes
+          </span>
+          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${livePositions.length > 0 ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)] animate-pulse' : 'bg-slate-600'}`} />
+        </div>
+      </div>
+
+      {/* ── Tabs ── */}
+      <div className="flex border-b border-slate-800/60 overflow-x-auto scrollbar-none">
+        {TABS.map(t => (
+          <button
+            key={t.key}
+            onClick={() => setTab(t.key)}
+            className={`flex-shrink-0 flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium border-b-2 transition-all ${
+              tab === t.key
+                ? 'border-violet-400 text-violet-300'
+                : 'border-transparent text-slate-500 hover:text-slate-300'
+            }`}
+          >
+            <Icon name={t.icon} size={13} />
+            {t.label}
+            {t.badge ? (
+              <span className="ml-1 bg-violet-500/25 text-violet-300 text-2xs font-bold px-1.5 py-0.5 rounded-full">{t.badge}</span>
+            ) : null}
+          </button>
+        ))}
+      </div>
+
+      <div className="p-4 sm:p-5">
+
+        {/* ══ TAB: SYNC CODE ══ */}
+        {tab === 'sync' && (
+          <div className="space-y-4">
+            {/* Generator */}
+            <div className="space-y-3">
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Generate a secure sync code to pair the AP3X Driver App with this Fleet Control OS. The driver enters the code once — all data flows automatically.
+              </p>
+
+              {/* Driver + Vehicle selectors */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-2xs text-slate-500 mb-1.5 font-medium uppercase tracking-wider">Driver</label>
+                  {drivers?.length > 0 ? (
+                    <select
+                      value={syncDriver}
+                      onChange={e => {
+                        setSyncDriver(e.target.value)
+                        const d = drivers.find(dr => dr.id === e.target.value)
+                        setSyncDriverName(d?.full_name || '')
+                        setSyncVehicleReg(d?.vehicle_reg || d?.license_plate || '')
+                      }}
+                      className="w-full bg-slate-800/50 border border-slate-700/50 rounded-lg px-3 py-2 text-sm text-white focus:border-violet-500/50 focus:outline-none appearance-none"
+                    >
+                      <option value="">— Guest Driver —</option>
+                      {drivers.map(d => (
+                        <option key={d.id} value={d.id}>{d.full_name}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      value={syncDriverName}
+                      onChange={e => setSyncDriverName(e.target.value)}
+                      placeholder="Driver name"
+                      className="w-full bg-slate-800/50 border border-slate-700/50 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-600 focus:border-violet-500/50 focus:outline-none"
+                    />
+                  )}
+                </div>
+                <div>
+                  <label className="block text-2xs text-slate-500 mb-1.5 font-medium uppercase tracking-wider">Vehicle Reg</label>
+                  <input
+                    value={syncVehicleReg}
+                    onChange={e => setSyncVehicleReg(e.target.value)}
+                    placeholder="e.g. AB12 CDE"
+                    className="w-full bg-slate-800/50 border border-slate-700/50 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-600 focus:border-violet-500/50 focus:outline-none font-mono"
+                  />
+                </div>
+              </div>
+
+              {/* Generate button */}
+              <button
+                onClick={handleGenerate}
+                className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-violet-500/20 border border-violet-500/30 text-violet-300 text-sm font-semibold hover:bg-violet-500/30 transition-all"
+              >
+                <Icon name="Zap" size={15} />
+                Generate Sync Code
+              </button>
+            </div>
+
+            {/* Code card */}
+            {syncCode && (
+              <>
+                <SyncCodeCard
+                  code={syncCode}
+                  expiry={syncExpiry}
+                  qr={syncQR}
+                  driverName={syncDriverName}
+                  vehicleReg={syncVehicleReg}
+                  onRevoke={() => { revokeSyncCode(syncCode); setSyncCode(''); setSyncQR(null); setActiveCodes(getActiveSyncCodes()) }}
+                  onCopy={handleCopy}
+                  copied={copied}
+                />
+
+                {/* Share buttons */}
+                <div className="grid grid-cols-3 gap-2">
+                  {[
+                    { method: 'whatsapp', icon: 'MessageCircle', label: 'WhatsApp', color: 'emerald' },
+                    { method: 'email',    icon: 'Mail',           label: 'Email',    color: 'blue'    },
+                    { method: 'native',   icon: 'Share2',         label: 'Share',    color: 'slate'   },
+                  ].map(b => (
+                    <button
+                      key={b.method}
+                      onClick={() => handleShare(b.method)}
+                      disabled={shareStatus?.state === 'busy'}
+                      className={`flex flex-col items-center gap-1.5 px-2 py-2.5 rounded-lg border text-xs font-medium transition-all ${
+                        shareStatus?.method === b.method && shareStatus.state === 'ok'
+                          ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
+                          : 'bg-slate-800/40 border-slate-700/40 text-slate-400 hover:text-slate-200 hover:bg-slate-800/70'
+                      }`}
+                    >
+                      <Icon name={b.icon} size={16} />
+                      {b.label}
+                    </button>
+                  ))}
+                </div>
+
+                {shareStatus && (
+                  <div className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs ${
+                    shareStatus.state === 'ok'   ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/20' :
+                    shareStatus.state === 'fail' ? 'bg-red-500/10 text-red-300 border border-red-500/20' :
+                    'bg-slate-800/50 text-slate-400 border border-slate-700/40'
+                  }`}>
+                    {shareStatus.state === 'busy' && <Icon name="Loader2" size={12} className="animate-spin" />}
+                    {shareStatus.state === 'ok'   && <Icon name="CheckCircle" size={12} />}
+                    {shareStatus.state === 'fail' && <Icon name="XCircle" size={12} />}
+                    {shareStatus.state === 'ok'   ? 'Sent successfully' :
+                     shareStatus.state === 'fail' ? (shareStatus.msg || 'Failed') :
+                     'Sending…'}
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* Active codes */}
+            {activeCodes.length > 0 && (
+              <div>
+                <p className="text-2xs text-slate-600 font-medium uppercase tracking-wider mb-2">Active Codes ({activeCodes.length})</p>
+                <div className="space-y-2">
+                  {activeCodes.map(c => (
+                    <div key={c.code} className="flex items-center gap-3 px-3 py-2 rounded-lg bg-slate-800/30 border border-slate-700/30">
+                      <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${c.status === 'active' ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+                      <span className="font-mono text-xs text-slate-300 flex-1 truncate">{c.code}</span>
+                      <span className="text-2xs text-slate-500 truncate">{c.driver_name}</span>
+                      <span className={`text-2xs font-semibold px-1.5 py-0.5 rounded ${c.status === 'active' ? 'text-emerald-300 bg-emerald-500/10' : 'text-amber-300 bg-amber-500/10'}`}>
+                        {c.status}
+                      </span>
+                      <button onClick={() => { revokeSyncCode(c.code); setActiveCodes(getActiveSyncCodes()) }}
+                        className="p-1 text-slate-600 hover:text-red-400 transition-colors">
+                        <Icon name="X" size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* How it works */}
+            <div className="bg-slate-800/20 border border-slate-700/30 rounded-lg p-3 space-y-2">
+              <p className="text-2xs font-semibold text-slate-400 uppercase tracking-wider">How Sync Works</p>
+              {[
+                ['1', 'Generate a sync code above and share it with the driver'],
+                ['2', 'Driver opens AP3X Driver App → taps "Enter Sync Code"'],
+                ['3', 'Driver app pairs instantly — location streams to fleet map'],
+                ['4', 'AI agents (Sentinel + RouteMind) send reports back here'],
+                ['5', 'Send commands, alerts, and dispatch orders from the Commands tab'],
+              ].map(([n, txt]) => (
+                <div key={n} className="flex items-start gap-2">
+                  <span className="w-4 h-4 rounded-full bg-violet-500/20 text-violet-400 text-2xs font-bold flex items-center justify-center flex-shrink-0 mt-0.5">{n}</span>
+                  <span className="text-2xs text-slate-400 leading-relaxed">{txt}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ══ TAB: LIVE DRIVERS ══ */}
+        {tab === 'live' && (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-slate-400">Real-time driver positions from paired apps</p>
+              <span className="text-2xs text-slate-600">Updates every 5s</span>
+            </div>
+
+            {activeDrivers.length === 0 && livePositions.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-10 gap-3">
+                <div className="w-12 h-12 rounded-full bg-slate-800/60 border border-slate-700/40 flex items-center justify-center">
+                  <Icon name="MapPin" size={20} className="text-slate-600" />
+                </div>
+                <p className="text-sm text-slate-500">No drivers connected</p>
+                <p className="text-2xs text-slate-600 text-center max-w-xs">
+                  Generate a sync code on the Sync Code tab and share it with a driver to see their live location here
+                </p>
+              </div>
+            ) : (
+              <>
+                {/* Live position cards */}
+                {livePositions.map(pos => {
+                  const age = Math.floor((Date.now() - new Date(pos.ts).getTime()) / 1000)
+                  return (
+                    <div key={pos.vehicle_id} className="bg-[#060b18] border border-cyan-500/20 rounded-lg p-3">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="w-2 h-2 rounded-full bg-cyan-400 shadow-[0_0_6px_rgba(0,212,255,0.8)] animate-pulse" />
+                          <span className="text-sm font-medium text-white">{pos.driver_id}</span>
+                          <span className="text-2xs text-slate-600 font-mono">{pos.vehicle_id}</span>
+                        </div>
+                        <span className="text-2xs text-slate-600">{age < 60 ? `${age}s ago` : `${Math.floor(age/60)}m ago`}</span>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2">
+                        <div className="text-center bg-slate-800/30 rounded-lg py-1.5">
+                          <div className="text-xs font-bold text-cyan-400 font-mono">{pos.speed ?? 0}</div>
+                          <div className="text-2xs text-slate-600">km/h</div>
+                        </div>
+                        <div className="text-center bg-slate-800/30 rounded-lg py-1.5">
+                          <div className="text-xs font-bold text-slate-300 font-mono">{pos.lat?.toFixed(5)}</div>
+                          <div className="text-2xs text-slate-600">lat</div>
+                        </div>
+                        <div className="text-center bg-slate-800/30 rounded-lg py-1.5">
+                          <div className="text-xs font-bold text-slate-300 font-mono">{pos.lng?.toFixed(5)}</div>
+                          <div className="text-2xs text-slate-600">lng</div>
+                        </div>
+                      </div>
+                      <div className="mt-2 flex items-center gap-2 text-2xs text-slate-500">
+                        <Icon name="Navigation" size={10} />
+                        <span>Heading {pos.heading ?? 0}° · Accuracy ±{pos.accuracy ?? 0}m · {pos.status ?? 'en_route'}</span>
+                      </div>
+                    </div>
+                  )
+                })}
+
+                {/* Active driver rows */}
+                {activeDrivers.map(d => (
+                  <ActiveDriverRow
+                    key={d.driver_id || d.code}
+                    driver={d}
+                    onMessage={(drv) => { setCmdDriver(drv.driver_id); setCmdType('message'); setTab('commands') }}
+                    onAlert={(drv) =>   { setCmdDriver(drv.driver_id); setCmdType('alert');   setTab('commands') }}
+                  />
+                ))}
+
+                <p className="text-2xs text-slate-600 text-center pt-1">
+                  Live positions also visible on the <button onClick={() => {}} className="text-cyan-400 hover:underline">Fleet Map</button> — go to Navigation
+                </p>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* ══ TAB: COMMANDS ══ */}
+        {tab === 'commands' && (
+          <div className="space-y-4">
+            <p className="text-xs text-slate-400">Send real-time commands, alerts, and dispatch orders to connected drivers</p>
+
+            {/* Target driver */}
+            <div>
+              <label className="block text-2xs text-slate-500 mb-1.5 font-medium uppercase tracking-wider">Target Driver</label>
+              <select
+                value={cmdDriver}
+                onChange={e => setCmdDriver(e.target.value)}
+                className="w-full bg-slate-800/50 border border-slate-700/50 rounded-lg px-3 py-2 text-sm text-white focus:border-violet-500/50 focus:outline-none appearance-none"
+              >
+                <option value="">— Broadcast to All Drivers —</option>
+                {activeDrivers.map(d => (
+                  <option key={d.driver_id} value={d.driver_id}>{d.driver_name} ({d.vehicle_reg})</option>
+                ))}
+                {drivers?.map(d => (
+                  <option key={d.id} value={d.id}>{d.full_name}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Command type */}
+            <div>
+              <label className="block text-2xs text-slate-500 mb-1.5 font-medium uppercase tracking-wider">Command Type</label>
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { key: 'message',  icon: 'MessageSquare', label: 'Message',  color: 'cyan'  },
+                  { key: 'alert',    icon: 'AlertTriangle', label: 'Alert',    color: 'amber' },
+                  { key: 'dispatch', icon: 'Package',       label: 'Dispatch', color: 'violet'},
+                ].map(t => (
+                  <button
+                    key={t.key}
+                    onClick={() => setCmdType(t.key)}
+                    className={`flex flex-col items-center gap-1.5 py-2.5 rounded-lg border text-xs font-medium transition-all ${
+                      cmdType === t.key
+                        ? t.color === 'cyan'   ? 'bg-cyan-500/15 border-cyan-500/30 text-cyan-300'     :
+                          t.color === 'amber'  ? 'bg-amber-500/15 border-amber-500/30 text-amber-300'  :
+                          'bg-violet-500/15 border-violet-500/30 text-violet-300'
+                        : 'bg-slate-800/30 border-slate-700/30 text-slate-500 hover:text-slate-300'
+                    }`}
+                  >
+                    <Icon name={t.icon} size={15} />
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Message input */}
+            <div>
+              <label className="block text-2xs text-slate-500 mb-1.5 font-medium uppercase tracking-wider">
+                {cmdType === 'message' ? 'Message' : cmdType === 'alert' ? 'Alert Text' : 'Job / Instruction'}
+              </label>
+              <textarea
+                value={cmdText}
+                onChange={e => setCmdText(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendCommand() } }}
+                placeholder={
+                  cmdType === 'message'  ? 'Type a message to the driver…' :
+                  cmdType === 'alert'    ? 'e.g. Road closure on A1, take M6 alternate' :
+                  'e.g. Pick up at Unit 4, Parkway Industrial Estate — Ref: JB-2042'
+                }
+                rows={3}
+                className="w-full bg-slate-800/50 border border-slate-700/50 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-600 focus:border-violet-500/50 focus:outline-none resize-none"
+              />
+            </div>
+
+            <button
+              onClick={handleSendCommand}
+              disabled={!cmdText.trim()}
+              className={`w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-semibold transition-all ${
+                cmdSent
+                  ? 'bg-emerald-500/20 border border-emerald-500/30 text-emerald-300'
+                  : 'bg-violet-500/20 border border-violet-500/30 text-violet-300 hover:bg-violet-500/30 disabled:opacity-40 disabled:cursor-not-allowed'
+              }`}
+            >
+              {cmdSent ? <><Icon name="CheckCircle" size={15} /> Sent!</> : <><Icon name="Send" size={15} /> Send {cmdType === 'message' ? 'Message' : cmdType === 'alert' ? 'Alert' : 'Dispatch Order'}</>}
+            </button>
+
+            {/* Quick command buttons */}
+            <div>
+              <p className="text-2xs text-slate-600 mb-2 uppercase tracking-wider font-medium">Quick Commands</p>
+              <div className="grid grid-cols-2 gap-2">
+                {[
+                  { label: 'Return to base',          type: 'alert',   text: 'Return to base immediately.' },
+                  { label: 'Check in required',       type: 'message', text: 'Please check in — confirm your current status.' },
+                  { label: 'Speed advisory',          type: 'alert',   text: 'Reduce speed — road conditions ahead.' },
+                  { label: 'Delivery confirmed',      type: 'message', text: '✓ Delivery confirmed by control. Proceed to next stop.' },
+                ].map(q => (
+                  <button
+                    key={q.label}
+                    onClick={() => { setCmdType(q.type); setCmdText(q.text) }}
+                    className="text-left px-3 py-2 rounded-lg bg-slate-800/30 border border-slate-700/30 text-2xs text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 transition-colors"
+                  >
+                    {q.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ══ TAB: AI REPORTS ══ */}
+        {tab === 'ai' && (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-slate-400">Live AI agent reports from all connected driver apps</p>
+              <button
+                onClick={() => { localStorage.removeItem('apex:ai_reports'); setAIReports([]) }}
+                className="text-2xs text-slate-600 hover:text-slate-400 transition-colors"
+              >Clear</button>
+            </div>
+
+            {/* KPI strip */}
+            {aiReports.length > 0 && (() => {
+              const sentinels = aiReports.filter(r => r.type === 'sentinel')
+              const avgFatigue = sentinels.length ? Math.round(sentinels.reduce((s, r) => s + (r.data?.fatigue_score ?? 0), 0) / sentinels.length) : null
+              const avgSafety  = sentinels.length ? Math.round(sentinels.reduce((s, r) => s + (r.data?.safety_score  ?? 0), 0) / sentinels.length) : null
+              const harshCount = aiReports.filter(r => r.type === 'harsh_event').length
+              const drivers    = new Set(aiReports.map(r => r.driver_id)).size
+              return (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {[
+                    { label: 'Avg Fatigue', val: avgFatigue != null ? `${avgFatigue}%` : '—', color: avgFatigue > 70 ? 'red' : avgFatigue > 40 ? 'amber' : 'emerald' },
+                    { label: 'Avg Safety',  val: avgSafety  != null ? `${avgSafety}%`  : '—', color: avgSafety  < 50 ? 'red' : avgSafety  < 75 ? 'amber' : 'emerald' },
+                    { label: 'Harsh Events',val: harshCount,  color: harshCount > 0 ? 'red' : 'slate' },
+                    { label: 'Active AIs',  val: drivers,     color: 'violet' },
+                  ].map(k => (
+                    <div key={k.label} className={`text-center py-2.5 rounded-lg border ${
+                      k.color === 'red'     ? 'bg-red-500/8 border-red-500/20'         :
+                      k.color === 'amber'   ? 'bg-amber-500/8 border-amber-500/20'     :
+                      k.color === 'emerald' ? 'bg-emerald-500/8 border-emerald-500/20' :
+                      k.color === 'violet'  ? 'bg-violet-500/8 border-violet-500/20'   :
+                      'bg-slate-800/30 border-slate-700/30'
+                    }`}>
+                      <div className={`text-lg font-bold font-mono ${
+                        k.color === 'red'     ? 'text-red-400'     :
+                        k.color === 'amber'   ? 'text-amber-400'   :
+                        k.color === 'emerald' ? 'text-emerald-400' :
+                        k.color === 'violet'  ? 'text-violet-400'  : 'text-slate-400'
+                      }`}>{k.val}</div>
+                      <div className="text-2xs text-slate-600 mt-0.5">{k.label}</div>
+                    </div>
+                  ))}
+                </div>
+              )
+            })()}
+
+            {aiReports.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-10 gap-3">
+                <div className="w-12 h-12 rounded-full bg-slate-800/60 border border-slate-700/40 flex items-center justify-center">
+                  <Icon name="Cpu" size={20} className="text-slate-600" />
+                </div>
+                <p className="text-sm text-slate-500">No AI reports yet</p>
+                <p className="text-2xs text-slate-600 text-center max-w-xs">
+                  Connect a driver app to see Sentinel AI fatigue scores, RouteMind reports, and harsh event alerts in real time
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-2 max-h-96 overflow-y-auto scrollbar-none">
+                {aiReports.map(r => <AIReportCard key={r.id} report={r} />)}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+
 export default function Dashboard() {
   const navigate = useNavigate()
   const { vehicles } = useFleetStore(s => ({ vehicles: s.vehicles }))
@@ -949,7 +1710,7 @@ export default function Dashboard() {
         )}
 
         {/* Driver App Panel */}
-        <DriverAppPanel drivers={drivers} vehicles={vehicles} />
+        <DriverSyncSection drivers={drivers} vehicles={vehicles} />
 
         {/* Quick actions */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

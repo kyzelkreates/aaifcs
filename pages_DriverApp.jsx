@@ -43,6 +43,12 @@ import { mapService }  from './services_maps_mapService'
 import { getRuntimeKey, RUNTIME_KEYS } from './services_maps_runtimeKeys'
 import { safetyService, ALERT_TYPE, ALERT_SEVERITY } from './services_safety_safetyService'
 import { mountDriverBridge } from './services_apex_apexBridge'
+import {
+  activateSyncCode, pushDriverLocation, pushAIReport,
+  subscribeToFleetCommands,
+  getLiveDriverPositions,
+} from './services_sync_liveSync'
+
 
 // ── Fix default Leaflet marker icons ─────────────────────────
 delete L.Icon.Default.prototype._getIconUrl
@@ -446,7 +452,7 @@ function SetupScreen({ onReady }) {
       const hash   = window.location.hash || ''
       const search = hash.includes('?') ? hash.split('?')[1] : window.location.search
       const params = new URLSearchParams(search)
-      const c      = params.get('code')
+      const c = params.get('sync') || params.get('code')  // ?sync= (new) or ?code= (legacy)
       return c ? decodeURIComponent(c).toUpperCase() : ''
     } catch { return '' }
   })
@@ -457,9 +463,26 @@ function SetupScreen({ onReady }) {
   const [checking, setChecking] = useState(false)
 
   const submitCode = () => {
-    if (!/^APEX-[A-F0-9]{8}-[A-F0-9]{4}-DA$/.test(code.trim().toUpperCase())) return setErr('Enter your full APEX-…-DA driver pairing code')
+    const trimmed = code.trim().toUpperCase()
+    // Accept APEX-…-FC (new liveSync) or APEX-…-DA (legacy pairing)
+    if (!/^APEX-[A-Z0-9]{4,8}-[A-Z0-9]{4}-[A-Z]{2}$/.test(trimmed)) {
+      return setErr('Enter your full APEX-… sync code (check with your fleet operator)')
+    }
     setChecking(true); setErr('')
-    const result = validatePairingCode(code.trim())
+
+    // Try new liveSync activation first (FC codes)
+    if (trimmed.endsWith('-FC')) {
+      const res = activateSyncCode(trimmed, null)
+      setChecking(false)
+      if (!res.ok) return setErr(res.error || 'Invalid or expired code')
+      setPaired({ driverId: res.record.driver_id, driverName: res.record.driver_name, vehicleReg: res.record.vehicle_reg, record: res.record })
+      setName(res.record.driver_name || '')
+      setStep('profile')
+      return
+    }
+
+    // Legacy DA code path
+    const result = validatePairingCode(trimmed)
     setChecking(false)
     if (!result.ok) return setErr(result.error)
     setPaired(result)
@@ -827,12 +850,38 @@ function DriverAppMain({ profile, onLogout }) {
         ts: tsNow(),
       }
       try { pushTelemetryToFleet(profile.id, pkg) } catch {}
+      // ── Live sync bridge — pushes to fleet map ──────────────
+      try {
+        pushDriverLocation(profile.id, profile.vehicle_id || profile.id, {
+          lat: pos[0], lng: pos[1], speed, heading, accuracy, status: 'en_route'
+        })
+      } catch {}
       try { localStorage.setItem(`apex:tel:${profile.vehicle_id}`, JSON.stringify(pkg)) } catch {}
       // ── Apex CC bridge: GPS tick ─────────────────────────────
       try { apexBridgeRef.current?.onGpsTick?.({ lat: pos[0], lng: pos[1], speed, fuel: null, status: 'en_route' }) } catch {}
     }, 5000)
     return () => clearInterval(t)
   }, [pos, speed, heading, accuracy, tripDist, destName, profile])
+
+  // ── Fleet command subscriber (liveSync bridge) ──────────────
+  useEffect(() => {
+    if (!profile?.id) return
+    const unsub = subscribeToFleetCommands(profile.id, (cmd) => {
+      // Convert fleet command to chat message format
+      const msg = {
+        id:         cmd.id,
+        from:       cmd.type === 'alert' ? 'ai' : 'fleet',
+        text:       cmd.payload?.text || cmd.payload?.description || JSON.stringify(cmd.payload),
+        driver_id:  profile.id,
+        ts:         cmd.ts,
+        type:       cmd.type,
+        severity:   cmd.payload?.severity || null,
+      }
+      setMessages(prev => [...prev, msg])
+      setUnread(prev => prev + 1)
+    })
+    return unsub
+  }, [profile?.id])
 
   // ── Fleet chat listener ───────────────────────────────────────
   useEffect(() => {

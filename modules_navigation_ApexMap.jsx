@@ -37,6 +37,50 @@ const STATUS_ICON_CONFIG = {
   warning:     { ring: 'rgba(239,68,68,0.10)',  border: 'rgba(239,68,68,0.6)',  dot: '#ef4444',  glow: 'rgba(239,68,68,0.5)' },
 }
 
+// ─── Live Driver Icon (pulsing, distinct from fleet vehicles) ──
+const makeDriverLiveIcon = (label = '', heading = 0) => {
+  return L.divIcon({
+    className:  '',
+    iconSize:   [40, 52],
+    iconAnchor: [20, 52],
+    html: `
+      <div style="display:flex;flex-direction:column;align-items:center;gap:3px;">
+        <div style="
+          width:40px;height:40px;border-radius:50%;
+          background:rgba(167,139,250,0.15);
+          border:2px solid rgba(167,139,250,0.9);
+          display:flex;align-items:center;justify-content:center;
+          box-shadow:0 0 18px rgba(167,139,250,0.6);
+          position:relative;
+          transform: rotate(${heading}deg);
+        ">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="rgba(167,139,250,1)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="3 11 22 2 13 21 11 13 3 11"/>
+          </svg>
+          <div style="
+            position:absolute;inset:-5px;border-radius:50%;
+            border:1.5px solid rgba(167,139,250,0.4);
+            animation:apex-pulse 1.5s ease-in-out infinite;
+          "></div>
+          <div style="
+            position:absolute;inset:-10px;border-radius:50%;
+            border:1px solid rgba(167,139,250,0.2);
+            animation:apex-pulse 1.5s ease-in-out 0.5s infinite;
+          "></div>
+        </div>
+        <div style="
+          background:rgba(167,139,250,0.9);color:#fff;
+          font-size:9px;font-weight:700;padding:2px 6px;
+          border-radius:4px;white-space:nowrap;max-width:80px;
+          overflow:hidden;text-overflow:ellipsis;
+          box-shadow:0 2px 8px rgba(0,0,0,0.4);
+          letter-spacing:0.03em;
+        ">${label || 'DRIVER'}</div>
+      </div>
+    `,
+  })
+}
+
 const makeVehicleIcon = (status = 'active', label = '') => {
   const cfg = STATUS_ICON_CONFIG[status] || STATUS_ICON_CONFIG.offline
   return L.divIcon({
@@ -228,7 +272,9 @@ const ApexMap = forwardRef(function ApexMap({
               position={[m.lat, m.lng]}
               icon={m.isDestination
                 ? makeDestinationIcon()
-                : makeVehicleIcon(m.status, m.label)
+                : m._live
+                  ? makeDriverLiveIcon(m.label, m.heading || 0)
+                  : makeVehicleIcon(m.status, m.label)
               }
               eventHandlers={{ click: () => onMarkerClick?.(m) }}
             >
