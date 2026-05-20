@@ -20,6 +20,10 @@ import { telemetryService } from './services_realtime_telemetryService'
 import { listenForDriverTelemetry, listenForDriverMessages, sendFleetReply, getDriverMessageHistory, generatePairingCode, getActivePairingCodes, listenForDriverAIReports, getDriverAIReportHistory, listenForPairingEvents } from './services_sync_driverSyncService'
 import { ROUTES } from './config_routes'
 import { useAIChat } from './modules_ai_useAIChat'
+import { fleetLearning }   from './intel_fleetLearning'
+import { complianceEngine } from './intel_complianceEngine'
+import { safetyEngine }     from './intel_safetyEngine'
+import { driverLearning }   from './intel_driverLearning'
 import { formatDateTime } from './utils_format'
 
 const ApexMap = lazy(() => import('./modules_navigation_ApexMap'))
@@ -765,6 +769,19 @@ export default function Dashboard() {
   const avgScore       = drivers.length
     ? Math.round(drivers.reduce((s, d) => s + (d.safety_score || 0), 0) / drivers.length) : null
 
+  // ── Apex Intelligence KPIs (lazy — computed once on load) ───
+  const [intelKPIs, setIntelKPIs] = useState(null)
+  useEffect(() => {
+    try {
+      const fleetStats   = fleetLearning.getFleetStats()
+      const intelligence = fleetLearning.getIntelligenceSummary()
+      const compScore    = complianceEngine.getFleetComplianceScore(vehicles)
+      const safetyKPIs   = safetyEngine.getFleetSafetyKPIs(vehicles, drivers)
+      const riskDrivers  = driverLearning.rankByRisk(drivers.map(d => d.id).filter(Boolean)).filter(d => d.riskScore > 60)
+      setIntelKPIs({ fleetStats, intelligence, compScore, safetyKPIs, riskDrivers })
+    } catch {}
+  }, [vehicles.length, drivers.length, alerts.length])
+
   const mapMarkers = vehicles
     .filter(v => v.lat && v.lng)
     .map(v => ({ id: v.id, lat: v.lat, lng: v.lng, label: v.reg_number, status: v.status, speed: v.speed, fuel: v.fuel_level }))
@@ -806,6 +823,79 @@ export default function Dashboard() {
             icon="Droplets" color={lowFuel > 0 ? 'text-red-400' : 'text-slate-500'}
             bg={lowFuel > 0 ? 'bg-red-500/5' : 'bg-slate-900/40'} border={lowFuel > 0 ? 'border-red-500/10' : 'border-slate-800/60'} onClick={() => navigate(ROUTES.FLEET)} />
         </div>
+
+
+        {/* ── Apex Intelligence Strip ──────────────────────────── */}
+        {intelKPIs && (
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+            {/* Fleet Safety Score */}
+            <div className="bg-[#0d1426] border border-slate-800/60 rounded-xl p-3 flex flex-col gap-1">
+              <div className="flex items-center gap-1.5 mb-0.5">
+                <Icon name="ShieldCheck" size={11} className="text-emerald-400" />
+                <span className="text-2xs text-slate-500 font-medium">Fleet Safety</span>
+              </div>
+              <div className={`text-xl font-bold font-mono ${intelKPIs.safetyKPIs.fleetSafetyScore >= 80 ? 'text-emerald-400' : intelKPIs.safetyKPIs.fleetSafetyScore >= 60 ? 'text-amber-400' : 'text-red-400'}`}>
+                {intelKPIs.safetyKPIs.fleetSafetyScore}<span className="text-xs text-slate-600 font-normal">/100</span>
+              </div>
+              <div className="text-2xs text-slate-600">{intelKPIs.safetyKPIs.criticalVehicles > 0 ? `${intelKPIs.safetyKPIs.criticalVehicles} critical issues` : 'All clear'}</div>
+            </div>
+            {/* Compliance Score */}
+            <div className="bg-[#0d1426] border border-slate-800/60 rounded-xl p-3 flex flex-col gap-1">
+              <div className="flex items-center gap-1.5 mb-0.5">
+                <Icon name="ClipboardCheck" size={11} className="text-cyan-400" />
+                <span className="text-2xs text-slate-500 font-medium">Compliance</span>
+              </div>
+              <div className={`text-xl font-bold font-mono ${intelKPIs.compScore >= 80 ? 'text-cyan-400' : intelKPIs.compScore >= 60 ? 'text-amber-400' : 'text-red-400'}`}>
+                {intelKPIs.compScore}<span className="text-xs text-slate-600 font-normal">/100</span>
+              </div>
+              <div className="text-2xs text-slate-600">Docs &amp; legality</div>
+            </div>
+            {/* Routes Learned */}
+            <div className="bg-[#0d1426] border border-slate-800/60 rounded-xl p-3 flex flex-col gap-1">
+              <div className="flex items-center gap-1.5 mb-0.5">
+                <Icon name="Brain" size={11} className="text-violet-400" />
+                <span className="text-2xs text-slate-500 font-medium">Routes Learned</span>
+              </div>
+              <div className="text-xl font-bold font-mono text-violet-400">
+                {(intelKPIs.fleetStats.jobsCompleted || 0).toLocaleString()}
+              </div>
+              <div className="text-2xs text-slate-600">{intelKPIs.fleetStats.totalKm > 0 ? `${Math.round(intelKPIs.fleetStats.totalKm).toLocaleString()} km` : 'No data yet'}</div>
+            </div>
+            {/* Success Rate */}
+            <div className="bg-[#0d1426] border border-slate-800/60 rounded-xl p-3 flex flex-col gap-1">
+              <div className="flex items-center gap-1.5 mb-0.5">
+                <Icon name="TrendingUp" size={11} className="text-emerald-400" />
+                <span className="text-2xs text-slate-500 font-medium">Success Rate</span>
+              </div>
+              <div className={`text-xl font-bold font-mono ${intelKPIs.fleetStats.successRate == null ? 'text-slate-600' : intelKPIs.fleetStats.successRate >= 90 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                {intelKPIs.fleetStats.successRate != null ? `${intelKPIs.fleetStats.successRate}%` : '—'}
+              </div>
+              <div className="text-2xs text-slate-600">Job completion</div>
+            </div>
+            {/* Bottlenecks */}
+            <div className="bg-[#0d1426] border border-slate-800/60 rounded-xl p-3 flex flex-col gap-1">
+              <div className="flex items-center gap-1.5 mb-0.5">
+                <Icon name="AlertTriangle" size={11} className="text-amber-400" />
+                <span className="text-2xs text-slate-500 font-medium">Bottlenecks</span>
+              </div>
+              <div className={`text-xl font-bold font-mono ${intelKPIs.intelligence.highSeverityBottlenecks > 0 ? 'text-amber-400' : 'text-slate-600'}`}>
+                {intelKPIs.intelligence.activeBottlenecks}
+              </div>
+              <div className="text-2xs text-slate-600">{intelKPIs.intelligence.highSeverityBottlenecks} high severity</div>
+            </div>
+            {/* High Risk Drivers */}
+            <div className="bg-[#0d1426] border border-slate-800/60 rounded-xl p-3 flex flex-col gap-1">
+              <div className="flex items-center gap-1.5 mb-0.5">
+                <Icon name="UserX" size={11} className={intelKPIs.riskDrivers.length > 0 ? 'text-red-400' : 'text-slate-500'} />
+                <span className="text-2xs text-slate-500 font-medium">High Risk</span>
+              </div>
+              <div className={`text-xl font-bold font-mono ${intelKPIs.riskDrivers.length > 0 ? 'text-red-400' : 'text-emerald-400'}`}>
+                {intelKPIs.riskDrivers.length}
+              </div>
+              <div className="text-2xs text-slate-600">drivers flagged</div>
+            </div>
+          </div>
+        )}
 
         {/* Empty state OR main grid */}
         {isEmpty ? (

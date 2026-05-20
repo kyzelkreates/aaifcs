@@ -21,6 +21,10 @@ import {
   listenForDriverTelemetry,
 } from './services_sync_driverSyncService'
 import { formatDateTime } from './utils_format'
+import { complianceEngine } from './intel_complianceEngine'
+import { safetyEngine }     from './intel_safetyEngine'
+import { driverLearning }   from './intel_driverLearning'
+import { routeScoring }     from './intel_routeScoring'
 
 const PRIORITY_ICONS = { low: 'ArrowDown', normal: 'Minus', high: 'ArrowUp', urgent: 'AlertOctagon' }
 
@@ -399,6 +403,68 @@ function AssignModal({ job, drivers, vehicles, onClose, onSaved }) {
               {vehicles.map(v => <option key={v.id} value={v.id}>{v.reg_number} — {v.make}</option>)}
             </select>
           </div>
+
+          {/* ── Apex Intelligence Pre-Dispatch Check ─────────────── */}
+          {driverId && vehicleId && (() => {
+            const driver  = drivers.find(d => d.id === driverId)
+            const vehicle = vehicles.find(v => v.id === vehicleId)
+            if (!driver || !vehicle) return null
+            const compliance = complianceEngine.checkDispatch({
+              vehicle, driver,
+              estimatedDrivingHours: 4,
+            })
+            const vSafety  = safetyEngine.analyseVehicle(vehicle)
+            const dRisk    = driverLearning.getRiskSummary(driverId)
+            const allClear = compliance.passed && vSafety.roadworthy && dRisk.riskScore < 60
+            return (
+              <div className={`rounded-xl border p-3 space-y-2 ${allClear ? 'bg-emerald-500/5 border-emerald-500/15' : 'bg-red-500/5 border-red-500/15'}`}>
+                <div className="flex items-center gap-2">
+                  <Icon name={allClear ? 'ShieldCheck' : 'ShieldAlert'} size={13} className={allClear ? 'text-emerald-400' : 'text-red-400'} />
+                  <span className="text-xs font-semibold text-white">Apex Pre-Dispatch Intelligence</span>
+                  <span className={`ml-auto text-2xs font-bold px-2 py-0.5 rounded-full ${allClear ? 'bg-emerald-500/15 text-emerald-400' : 'bg-red-500/15 text-red-400'}`}>
+                    {allClear ? 'CLEARED' : 'ACTION REQUIRED'}
+                  </span>
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="text-center">
+                    <div className={`text-sm font-bold font-mono ${compliance.score >= 80 ? 'text-emerald-400' : compliance.score >= 50 ? 'text-amber-400' : 'text-red-400'}`}>{compliance.score}</div>
+                    <div className="text-2xs text-slate-600">Compliance</div>
+                  </div>
+                  <div className="text-center">
+                    <div className={`text-sm font-bold font-mono ${vSafety.overallRisk <= 20 ? 'text-emerald-400' : vSafety.overallRisk <= 50 ? 'text-amber-400' : 'text-red-400'}`}>{100 - vSafety.overallRisk}</div>
+                    <div className="text-2xs text-slate-600">Vehicle OK</div>
+                  </div>
+                  <div className="text-center">
+                    <div className={`text-sm font-bold font-mono ${dRisk.safetyScore >= 70 ? 'text-emerald-400' : dRisk.safetyScore >= 50 ? 'text-amber-400' : 'text-red-400'}`}>{dRisk.safetyScore}</div>
+                    <div className="text-2xs text-slate-600">Driver Score</div>
+                  </div>
+                </div>
+                {compliance.hardViolations.length > 0 && (
+                  <div className="space-y-1">
+                    {compliance.hardViolations.slice(0, 2).map((v, i) => (
+                      <div key={i} className="flex items-start gap-1.5 text-2xs text-red-400">
+                        <Icon name="XCircle" size={10} className="flex-shrink-0 mt-0.5" />
+                        {v}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {compliance.softViolations.length > 0 && (
+                  <div className="space-y-1">
+                    {compliance.softViolations.slice(0, 2).map((v, i) => (
+                      <div key={i} className="flex items-start gap-1.5 text-2xs text-amber-400">
+                        <Icon name="AlertTriangle" size={10} className="flex-shrink-0 mt-0.5" />
+                        {v}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {allClear && (
+                  <div className="text-2xs text-emerald-600">All pre-dispatch checks passed. Safe to dispatch.</div>
+                )}
+              </div>
+            )
+          })()}
           <div className="flex gap-3">
             <button type="button" onClick={onClose} className="flex-1 btn-ghost text-sm py-2">Cancel</button>
             <button type="submit" disabled={saving || !driverId} className="flex-1 btn-primary text-sm py-2 disabled:opacity-40">

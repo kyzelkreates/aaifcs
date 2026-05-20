@@ -11,6 +11,7 @@ import DriverCard  from './modules_drivers_DriverCard'
 import DriverModal from './modules_drivers_DriverModal'
 import { useDriverStore } from './core_storage'
 import { driverService, DRIVER_STATUS } from './services_drivers_driverService'
+import { driverLearning } from './intel_driverLearning'
 
 const STATUS_TABS = [
   { key: null,                       label: 'All' },
@@ -41,9 +42,10 @@ export default function Drivers() {
     return acc
   }, {})
 
-  const avgScore = drivers.length
+  const avgScore    = drivers.length
     ? Math.round(drivers.reduce((s, d) => s + (d.safety_score || 0), 0) / drivers.length)
     : null
+  const riskDrivers = drivers.length ? driverLearning.rankByRisk(drivers.map(d => d.id).filter(Boolean)).filter(d => d.riskScore > 60) : []
 
   return (
     <div className="flex flex-col h-full">
