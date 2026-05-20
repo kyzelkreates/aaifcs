@@ -263,7 +263,7 @@ export default function Compliance() {
 
   useEffect(() => { load() }, [load])
 
-  const expiring = complianceService.getExpiringRecords(records, 30)
+  const expiring = complianceService.getExpiring(30)
   const passing  = records.filter(r => r.status === 'pass').length
   const failing  = records.filter(r => ['fail', 'expired'].includes(r.status)).length
 

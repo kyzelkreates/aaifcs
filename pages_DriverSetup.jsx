@@ -177,8 +177,8 @@ export default function DriverSetup() {
 
   // ── Load data ─────────────────────────────────────────────
   useEffect(() => {
-    driverService.loadDrivers()
-    fleetService.loadVehicles()
+    driverService.fetchDrivers()
+    fleetService.fetchVehicles()
   }, [])
 
   // ── Tabs ──────────────────────────────────────────────────

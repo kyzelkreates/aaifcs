@@ -16,7 +16,7 @@ export function useVehicleTelemetry(vehicleId, callback) {
 
   useEffect(() => {
     if (!vehicleId) return
-    const unsub = telemetryService.subscribe(vehicleId, callback)
+    const unsub = telemetryService.subscribeToVehicle(vehicleId, callback)
     return unsub
   }, [vehicleId])
 
@@ -31,7 +31,7 @@ export function useFleetTelemetry(callback) {
   const telemetry = useFleetStore(s => s.telemetry)
 
   useEffect(() => {
-    const unsub = telemetryService.subscribeFleet(callback)
+    const unsub = telemetryService.subscribeToAll(callback)
     return unsub
   }, [])
 
