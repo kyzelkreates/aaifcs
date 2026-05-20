@@ -560,9 +560,10 @@ function DriversTab({ drivers, aiReports, telemetryRows, period }) {
     }).sort((a, b) => (b.safety_score || 0) - (a.safety_score || 0))
 
     // Also include drivers seen in telemetry but not in fleet driver list
+    const extra = []
     Object.values(driverStats).forEach(st => {
       if (!drivers.find(d => d.id === st.driver_id)) {
-        enriched && enriched.push({
+        extra.push({
           id:          st.driver_id,
           full_name:   st.driver_name || st.driver_id,
           vehicle_reg: st.vehicle_reg,
@@ -576,7 +577,7 @@ function DriversTab({ drivers, aiReports, telemetryRows, period }) {
       }
     })
 
-    return list
+    return [...list, ...extra]
   }, [drivers, driverStats, driverFatigue])
 
   if (enriched.length === 0) {

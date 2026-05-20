@@ -94,14 +94,6 @@ export function table(key) {
 }
 
 
-// ─── Federation-aware tenant-scoped table ─────────────────────
-// Re-exports tenantTable from tenantRegistry for convenience.
-// Use this for any data that must be tenant-isolated.
-// Example: const myTable = tenantScopedTable('vehicles')
-//   → stores at apex:t:<TENANT_ID>:vehicles (never leaks cross-tenant)
-export { tenantTable as tenantScopedTable } from './services_federation_tenantRegistry'
-export { tenantRegistry } from './services_federation_tenantRegistry'
-
 // ─── Named tables ─────────────────────────────────────────────
 export const vehicleTable   = table(DB_KEYS.VEHICLES)
 export const driverTable    = table(DB_KEYS.DRIVERS)
