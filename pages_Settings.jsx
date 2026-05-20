@@ -11,6 +11,7 @@ import Badge from './components_ui_Badge'
 import { useState, useEffect, useCallback } from 'react'
 import { useAppStore, useAuthStore, useAIStore, useMapStore } from './core_storage'
 import { tenantRegistry } from './services_federation_tenantRegistry'
+import apexClient from './services_apex_apexClient'
 import { apiUsageTracker } from './services_ai_aiUsageTracker'
 import { localRoutingEngine } from './services_routing_localRoutingEngine'
 import { authService } from './services_supabase_authService'
@@ -523,6 +524,14 @@ function FederationPanel() {
   const [usage,       setUsage]       = useState(null)
   const [routing,     setRouting]     = useState(null)
   const [ccEndpoint,  setCCEndpoint]  = useState(() => localStorage.getItem('apex:cc:endpoint') || '')
+  // Apex Command Center — full config
+  const [apexBaseUrl,  setApexBaseUrl]  = useState(() => localStorage.getItem('apex:cc:baseUrl')  || 'https://apexcontrolos.vercel.app')
+  const [apexApiKey,   setApexApiKey]   = useState(() => localStorage.getItem('apex:cc:apiKey')   || '')
+  const [apexTenantId, setApexTenantId] = useState(() => localStorage.getItem('apex:cc:tenantId') || '')
+  const [apexFleetId,  setApexFleetId]  = useState(() => localStorage.getItem('apex:cc:fleetId')  || '')
+  const [apexEnabled,  setApexEnabled]  = useState(() => localStorage.getItem('apex:cc:enabled')  !== 'false')
+  const [apexStatus,   setApexStatus]   = useState(null)   // null | 'ok' | 'error'
+  const [apexTesting,  setApexTesting]  = useState(false)
 
   useEffect(() => {
     setUsage(apiUsageTracker.getSummary(30))
@@ -554,6 +563,22 @@ function FederationPanel() {
     localStorage.setItem('apex:cc:endpoint', ccEndpoint)
     setSaved(true)
     setTimeout(() => setSaved(false), 2000)
+  }
+
+  const saveApexConfig = () => {
+    apexClient.saveConfig({ baseUrl: apexBaseUrl, apiKey: apexApiKey, tenantId: apexTenantId, fleetId: apexFleetId })
+    apexClient.setEnabled(apexEnabled)
+    setSaved(true)
+    setTimeout(() => setSaved(false), 2000)
+  }
+
+  const testApexConnection = async () => {
+    setApexTesting(true); setApexStatus(null)
+    apexClient.saveConfig({ baseUrl: apexBaseUrl, apiKey: apexApiKey, tenantId: apexTenantId, fleetId: apexFleetId })
+    apexClient.setEnabled(true)
+    const res = await apexClient.heartbeat()
+    setApexStatus(res?.ok ? 'ok' : 'error')
+    setApexTesting(false)
   }
 
   const manifest = tenantRegistry.exportManifest()
@@ -685,26 +710,122 @@ function FederationPanel() {
         </div>
       </div>
 
-      {/* Command Center endpoint (future) */}
-      <div className="bg-[#0d1426] border border-slate-800/60 rounded-xl p-5">
-        <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-4">Command Center Connection</div>
-        <div className="flex items-start gap-2 p-3 rounded-lg bg-slate-900/40 border border-slate-800/30 mb-4">
-          <Icon name="Info" size={13} className="text-cyan-400 flex-shrink-0 mt-0.5" />
-          <p className="text-2xs text-slate-500 leading-relaxed">
-            The Apex Command Center is a future separate system. Configure its endpoint here
-            and this OS will automatically sync telemetry and operational events to it.
-          </p>
+      {/* ── Apex Command Center Integration ──────────────────── */}
+      <div className="bg-[#0d1426] border border-violet-500/20 rounded-xl p-5">
+        {/* Header */}
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2.5">
+            <div className="w-7 h-7 rounded-lg bg-violet-500/10 border border-violet-500/20 flex items-center justify-center">
+              <Icon name="Radio" size={13} className="text-violet-400" />
+            </div>
+            <div>
+              <div className="text-xs font-semibold text-white">Apex Command Center</div>
+              <div className="text-2xs text-slate-600">Live telemetry · route completions · sustainability KPIs</div>
+            </div>
+          </div>
+          {/* Enable toggle */}
+          <div className="flex items-center gap-2">
+            <span className="text-2xs text-slate-600">{apexEnabled ? 'Enabled' : 'Disabled'}</span>
+            <button type="button" onClick={() => setApexEnabled(v => !v)}
+              className="relative w-10 rounded-full border transition-all flex-shrink-0"
+              style={{ height: 22, background: apexEnabled ? 'rgba(139,92,246,.15)' : '', borderColor: apexEnabled ? 'rgba(139,92,246,.35)' : 'rgb(51,65,85)' }}>
+              <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-all ${apexEnabled ? 'translate-x-4 bg-violet-400' : 'bg-slate-600'}`} />
+            </button>
+          </div>
         </div>
-        <div className="flex gap-2">
-          <input value={ccEndpoint} onChange={e => setCCEndpoint(e.target.value)}
-            placeholder="https://command-center.apex.ai/api/ingest"
-            className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder-slate-700 focus:border-violet-500 focus:outline-none" />
-          <button onClick={saveCCEndpoint}
-            className={`px-4 py-2 rounded-xl text-xs font-semibold transition-colors flex-shrink-0 ${
-              saved ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/20' : 'bg-slate-700 hover:bg-slate-600 text-white'
-            }`}>
-            {saved ? 'Saved' : 'Save'}
-          </button>
+
+        {/* Status badge */}
+        {apexStatus && (
+          <div className={`flex items-center gap-2 mb-3 p-2 rounded-lg border text-xs ${
+            apexStatus === 'ok'
+              ? 'bg-emerald-500/5 border-emerald-500/20 text-emerald-400'
+              : 'bg-red-500/5 border-red-500/20 text-red-400'
+          }`}>
+            <Icon name={apexStatus === 'ok' ? 'CheckCircle2' : 'XCircle'} size={12} />
+            {apexStatus === 'ok' ? '✓ Connected to Apex Command Center' : '✗ Connection failed — check credentials and URL'}
+          </div>
+        )}
+
+        {/* Offline queue indicator */}
+        {apexClient.getQueueLength() > 0 && (
+          <div className="flex items-center justify-between mb-3 p-2 rounded-lg bg-amber-500/5 border border-amber-500/15">
+            <div className="flex items-center gap-2 text-xs text-amber-400">
+              <Icon name="Clock" size={11} />
+              {apexClient.getQueueLength()} payload{apexClient.getQueueLength() !== 1 ? 's' : ''} queued for retry
+            </div>
+            <button onClick={() => apexClient.flushQueue()} className="text-2xs text-amber-400 hover:text-amber-300 underline">Retry now</button>
+          </div>
+        )}
+
+        {/* Config fields */}
+        <div className="space-y-3">
+          <div className="space-y-1.5">
+            <label className="text-2xs text-slate-500 font-medium block">Base URL</label>
+            <input value={apexBaseUrl} onChange={e => setApexBaseUrl(e.target.value)}
+              placeholder="https://apexcontrolos.vercel.app"
+              className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder-slate-700 focus:border-violet-500 focus:outline-none" />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <div className="space-y-1.5">
+              <label className="text-2xs text-slate-500 font-medium block">API Key <span className="text-slate-700">(X-Apex-Key)</span></label>
+              <input type="password" value={apexApiKey} onChange={e => setApexApiKey(e.target.value)}
+                placeholder="axk_xxxxxxxxxxxx"
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder-slate-700 focus:border-violet-500 focus:outline-none" />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-2xs text-slate-500 font-medium block">Tenant ID <span className="text-slate-700">(X-Tenant-Id)</span></label>
+              <input value={apexTenantId} onChange={e => setApexTenantId(e.target.value)}
+                placeholder="ten_xxxxxxxxxxxx"
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder-slate-700 focus:border-violet-500 focus:outline-none" />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-2xs text-slate-500 font-medium block">Fleet ID <span className="text-slate-700">(X-Fleet-Id)</span></label>
+              <input value={apexFleetId} onChange={e => setApexFleetId(e.target.value)}
+                placeholder="flt_xxxxxxxxxxxx"
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder-slate-700 focus:border-violet-500 focus:outline-none" />
+            </div>
+          </div>
+        </div>
+
+        {/* What gets pushed */}
+        <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 gap-2">
+          {[
+            { label: 'Fleet Heartbeat',   sub: 'Every 60s',   icon: 'Activity',   c: 'text-cyan-400'    },
+            { label: 'GPS Telemetry',     sub: 'Every 60s batch', icon: 'MapPin',  c: 'text-violet-400'  },
+            { label: 'Route Completions', sub: 'On job done',  icon: 'CheckCircle2', c: 'text-emerald-400' },
+            { label: 'Route Started',     sub: 'On job start', icon: 'Play',      c: 'text-blue-400'    },
+            { label: 'Driver Login/Out',  sub: 'On shift',     icon: 'User',      c: 'text-amber-400'   },
+            { label: 'Safety Alerts',     sub: 'On trigger',   icon: 'AlertTriangle', c: 'text-red-400'  },
+          ].map(f => (
+            <div key={f.label} className="flex items-center gap-2 p-2 rounded-lg bg-slate-900/40 border border-slate-800/30">
+              <Icon name={f.icon} size={11} className={f.c} />
+              <div>
+                <div className="text-2xs text-white font-medium">{f.label}</div>
+                <div className="text-2xs text-slate-700">{f.sub}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Save / Test buttons */}
+        <div className="flex items-center justify-between mt-4 pt-3 border-t border-slate-800/40">
+          <div className="text-2xs text-slate-700">
+            Get IDs: Apex → Tenant Management / Fleet Ops / Settings → API Keys
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={testApexConnection} disabled={apexTesting || !apexBaseUrl || !apexApiKey}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs border border-slate-700 text-slate-400 hover:text-white hover:border-slate-500 transition-colors disabled:opacity-30">
+              <Icon name={apexTesting ? 'Loader2' : 'Zap'} size={11} className={apexTesting ? 'animate-spin' : ''} />
+              {apexTesting ? 'Testing…' : 'Test Connection'}
+            </button>
+            <button onClick={saveApexConfig}
+              className={`flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                saved ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/20' : 'bg-violet-500/15 text-violet-300 border border-violet-500/20 hover:bg-violet-500/25'
+              }`}>
+              <Icon name={saved ? 'CheckCircle2' : 'Save'} size={11} />
+              {saved ? 'Saved' : 'Save Config'}
+            </button>
+          </div>
         </div>
       </div>
 

@@ -42,6 +42,7 @@ import { aiRouter }   from './services_ai_aiRouter'
 import { mapService }  from './services_maps_mapService'
 import { getRuntimeKey, RUNTIME_KEYS } from './services_maps_runtimeKeys'
 import { safetyService, ALERT_TYPE, ALERT_SEVERITY } from './services_safety_safetyService'
+import { mountDriverBridge } from './services_apex_apexBridge'
 
 // ── Fix default Leaflet marker icons ─────────────────────────
 delete L.Icon.Default.prototype._getIconUrl
@@ -826,6 +827,20 @@ function DriverAppMain({ profile, onLogout }) {
     setShowPortal(false)
   }
 
+  // ── Apex Command Center Bridge (additive — no existing logic changes) ─
+  const apexBridgeRef = useRef(null)
+  useEffect(() => {
+    const bridge = mountDriverBridge(profile)
+    apexBridgeRef.current = bridge
+    // Flush retry queue on mount / reconnect
+    const onOnline = () => bridge?.cleanup?.()
+    return () => {
+      bridge?.onLogout?.(0)
+      bridge?.cleanup?.()
+      apexBridgeRef.current = null
+    }
+  }, [profile?.id])  // eslint-disable-line
+
   // ── GPS state ────────────────────────────────────────────────
   const [pos,      setPos]      = useState(null)
   const [speed,    setSpeed]    = useState(0)
@@ -1036,6 +1051,8 @@ function DriverAppMain({ profile, onLogout }) {
       }
       try { pushTelemetryToFleet(profile.id, pkg) } catch {}
       try { localStorage.setItem(`apex:tel:${profile.vehicle_id}`, JSON.stringify(pkg)) } catch {}
+      // ── Apex CC bridge: GPS tick ─────────────────────────────
+      try { apexBridgeRef.current?.onGpsTick?.({ lat: pos[0], lng: pos[1], speed, fuel: null, status: 'en_route' }) } catch {}
     }, 5000)
     return () => clearInterval(t)
   }, [pos, speed, heading, accuracy, tripDist, destName, profile])
@@ -1349,6 +1366,8 @@ function DriverAppMain({ profile, onLogout }) {
     setStopRoutes([])
     updateJobStatus(job.id, 'in_progress', profile.id)
     setTab('map')
+    // ── Apex CC bridge: route started ──────────────────────────
+    try { apexBridgeRef.current?.onJobStart?.(job) } catch {}
 
     // Collect all stop addresses from the job object
     // Supports: stops[], waypoints[], pickup_address+dropoff_address, or single destination
@@ -1451,7 +1470,11 @@ function DriverAppMain({ profile, onLogout }) {
     try {
       sendFleetReply(profile.id, `Job completed: ${job.title}`, false)
     } catch {}
-  }, [activeJob, profile.id])
+    // ── Apex CC bridge: route complete ────────────────────────
+    try {
+      apexBridgeRef.current?.onJobComplete?.(job, tripDist / 1000)
+    } catch {}
+  }, [activeJob, profile.id, tripDist])
 
   // ── Computed ──────────────────────────────────────────────────
   const fatigueColor = alertLevel === 'danger' ? 'text-red-400' : alertLevel === 'warn' ? 'text-amber-400' : 'text-emerald-400'
