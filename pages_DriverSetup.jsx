@@ -462,7 +462,7 @@ export default function DriverSetup() {
                     <div className="text-2xs text-slate-600 uppercase tracking-[0.25em] font-semibold mb-2">
                       AP3X Driver Pairing Code
                     </div>
-                    <div className="font-mono font-bold text-violet-200 text-lg sm:text-xl tracking-[0.1em] break-all select-all leading-relaxed mb-2">
+                    <div className="font-mono font-bold text-violet-200 text-lg sm:text-xl tracking-wide break-all select-all leading-relaxed mb-2 text-sm">
                       {pairingCode}
                     </div>
                     {codeExpiry && (
@@ -562,7 +562,7 @@ export default function DriverSetup() {
                     {[
                       { n: '1', text: 'Open the AP3X Driver App link on your phone' },
                       { n: '2', text: 'Tap "Enter Pairing Code" on the welcome screen' },
-                      { n: '3', text: `Enter this code: ${pairingCode || 'APEX-XXXX-XXXX-XXXX-FC'}` },
+                      { n: '3', text: `Paste the full APXS-… code in the Driver App` },
                       { n: '4', text: 'Set a PIN and confirm your name — you\'re connected!' },
                     ].map(s => (
                       <div key={s.n} className="flex items-start gap-2.5">

@@ -38,57 +38,126 @@ const writeJSON = (key, val) => {
 }
 
 // ─── PAIRING CODE SYSTEM ──────────────────────────────────────
+//
+// HOW IT WORKS (cross-device safe)
+// ─────────────────────────────────────────────────────────────
+// The sync code is a SELF-CONTAINED token:
+//   APXS-<base64url(JSON payload)>
+//
+// Payload: { v, d, n, r, e, k }
+//   v = version (1)
+//   d = driverId
+//   n = driverName
+//   r = vehicleReg
+//   e = expiry (Unix seconds)
+//   k = { apiKeyName: value, ... }  (runtime keys to inject)
+//
+// Validation is LOCAL — the driver app decodes the token itself.
+// No shared localStorage or server needed.
+// Fleet side also stores the record for tracking/revocation.
+//
+// ─────────────────────────────────────────────────────────────
+
+const b64Encode = (str) => {
+  try {
+    return btoa(unescape(encodeURIComponent(str)))
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  } catch { return '' }
+}
+
+const b64Decode = (str) => {
+  try {
+    const pad = str.replace(/-/g, '+').replace(/_/g, '/') + '=='.slice(0, (4 - str.length % 4) % 4)
+    return decodeURIComponent(escape(atob(pad)))
+  } catch { return null }
+}
+
 /**
- * Generate a new sync code: APEX-XXXXXXXX-XXXX-FC
- * Stores it in pairing codes list with 1-hour TTL
+ * Build an APXS self-contained sync code.
+ * Encodes driver identity + expiry + API keys into a base64url token.
+ * Cross-device safe — driver app decodes locally, no shared storage needed.
+ */
+function buildToken(driverId, driverName, vehicleReg, ttlMinutes, apiKeys) {
+  const payload = {
+    v: 1,
+    d: driverId,
+    n: driverName,
+    r: vehicleReg,
+    e: Math.floor(Date.now() / 1000) + ttlMinutes * 60,
+    k: apiKeys || {},
+  }
+  const encoded = b64Encode(JSON.stringify(payload))
+  return `APXS-${encoded}`
+}
+
+/**
+ * Decode and validate an APXS token.
+ * Returns { ok, payload } or { ok: false, error }
+ */
+export function decodeToken(code) {
+  const trimmed = (code || '').trim()
+  if (!trimmed.startsWith('APXS-')) {
+    return { ok: false, error: 'Invalid code format. Code must start with APXS-' }
+  }
+  const encoded = trimmed.slice(5)
+  const json = b64Decode(encoded)
+  if (!json) return { ok: false, error: 'Code is corrupted or incomplete' }
+  let payload
+  try { payload = JSON.parse(json) } catch { return { ok: false, error: 'Code is corrupted' } }
+  if (payload.v !== 1) return { ok: false, error: 'Unsupported code version' }
+  if (!payload.d || !payload.e) return { ok: false, error: 'Code is missing required fields' }
+  if (Math.floor(Date.now() / 1000) > payload.e) {
+    return { ok: false, error: 'Code has expired — ask your fleet manager for a new one' }
+  }
+  return { ok: true, payload }
+}
+
+/**
+ * Fleet: generate a new self-contained sync code.
+ * Collects runtime API keys from localStorage and embeds them.
+ * Also stores a record locally for tracking and revocation.
  */
 export function generateSyncCode(driverId = null, driverName = 'Driver', vehicleReg = '—', ttlMinutes = 60, apiKeys = null) {
-  const rand = () => {
-    const hex = '0123456789ABCDEF'
-    let s = ''
-    for (let i = 0; i < 4; i++) s += hex[Math.floor(Math.random() * 16)]
-    return s
-  }
-  const code = `APEX-${rand()}${rand()}-${rand()}-FC`
-
-  // Collect runtime API keys from localStorage to embed in sync record
+  // Collect runtime API keys from fleet dashboard localStorage
   const runtimeKeys = apiKeys || {}
-  const LS_KEYS = {
-    graphhopper: 'apex_rk_graphhopper',
-    google_maps: 'apex_rk_google_maps',
-    mapbox:      'apex_rk_mapbox',
-    openai:      'apex_rk_openai',
-    openrouter:  'apex_rk_openrouter',
-    groq:        'apex_rk_groq',
-    deepseek:    'apex_rk_deepseek',
-    mistral:     'apex_rk_mistral',
-    anthropic:   'apex_rk_anthropic',
-    gemini:      'apex_rk_gemini',
-    ollama_url:  'apex_rk_ollama_url',
-  }
   if (!apiKeys) {
-    Object.entries(LS_KEYS).forEach(([k, lsKey]) => {
+    const LS_MAP = {
+      gh: 'apex_rk_graphhopper',
+      gm: 'apex_rk_google_maps',
+      mb: 'apex_rk_mapbox',
+      oa: 'apex_rk_openai',
+      or: 'apex_rk_openrouter',
+      gq: 'apex_rk_groq',
+      ds: 'apex_rk_deepseek',
+      ms: 'apex_rk_mistral',
+      an: 'apex_rk_anthropic',
+      gn: 'apex_rk_gemini',
+      ol: 'apex_rk_ollama_url',
+    }
+    Object.entries(LS_MAP).forEach(([k, lsKey]) => {
       const val = localStorage.getItem(lsKey)
       if (val) runtimeKeys[k] = val
     })
   }
 
+  const resolvedDriverId = driverId || `guest-${Date.now()}`
+  const code = buildToken(resolvedDriverId, driverName, vehicleReg, ttlMinutes, runtimeKeys)
+
+  // Store record for fleet-side tracking / revocation
   const record = {
     code,
-    driver_id:   driverId || `guest-${Date.now()}`,
+    driver_id:   resolvedDriverId,
     driver_name: driverName,
     vehicle_reg: vehicleReg,
     created_at:  tsNow(),
     expires_at:  new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString(),
-    status:      'pending',   // pending | active | revoked
+    status:      'pending',
     paired_at:   null,
     last_seen:   null,
     telemetry:   null,
-    api_keys:    runtimeKeys, // runtime keys forwarded to driver app
   }
-  const codes = readJSON(PAIRING_CODES_KEY, [])
-  // Remove expired
-  const fresh = codes.filter(c => c.status !== 'revoked' && new Date(c.expires_at) > new Date())
+  const existing = readJSON(PAIRING_CODES_KEY, [])
+  const fresh = existing.filter(c => c.status !== 'revoked' && new Date(c.expires_at) > new Date())
   fresh.unshift(record)
   writeJSON(PAIRING_CODES_KEY, fresh.slice(0, 20))
   getChannel()?.postMessage({ type: 'CODE_CREATED', code: record })
@@ -102,74 +171,79 @@ export function getActiveSyncCodes() {
 
 export function revokeSyncCode(code) {
   const codes = readJSON(PAIRING_CODES_KEY, [])
-  const updated = codes.map(c => c.code === code ? { ...c, status: 'revoked' } : c)
-  writeJSON(PAIRING_CODES_KEY, updated)
+  writeJSON(PAIRING_CODES_KEY, codes.map(c => c.code === code ? { ...c, status: 'revoked' } : c))
   getChannel()?.postMessage({ type: 'CODE_REVOKED', code })
 }
 
 /**
- * Driver app calls this to activate the sync code and pair with fleet
+ * Driver app: activate a sync code.
+ * Decodes the self-contained APXS token — NO shared localStorage needed.
+ * Works cross-device: the driver just needs the code string.
  */
 export function activateSyncCode(code, driverProfile) {
-  const codes = readJSON(PAIRING_CODES_KEY, [])
-  const idx = codes.findIndex(c => c.code === code && c.status === 'pending')
-  if (idx === -1) return { ok: false, error: 'Invalid or expired code' }
-  if (new Date(codes[idx].expires_at) < new Date()) return { ok: false, error: 'Code expired' }
+  // Decode the self-contained token
+  const { ok, payload, error } = decodeToken(code)
+  if (!ok) return { ok: false, error }
 
-  codes[idx] = {
-    ...codes[idx],
-    status:    'active',
-    paired_at: tsNow(),
-    driver_id: driverProfile?.id || codes[idx].driver_id,
-    driver_name: driverProfile?.full_name || codes[idx].driver_name,
-    vehicle_reg: driverProfile?.vehicle_reg || codes[idx].vehicle_reg,
-  }
-  writeJSON(PAIRING_CODES_KEY, codes)
+  // Resolve driver identity (use profile override or token data)
+  const driverId   = driverProfile?.id        || payload.d
+  const driverName = driverProfile?.full_name  || payload.n
+  const vehicleReg = driverProfile?.vehicle_reg || payload.r
 
-  // ── Inject API keys from fleet dashboard into driver device ──
-  const apiKeys = codes[idx].api_keys || {}
-  const LS_KEYS = {
-    graphhopper: 'apex_rk_graphhopper',
-    google_maps: 'apex_rk_google_maps',
-    mapbox:      'apex_rk_mapbox',
-    openai:      'apex_rk_openai',
-    openrouter:  'apex_rk_openrouter',
-    groq:        'apex_rk_groq',
-    deepseek:    'apex_rk_deepseek',
-    mistral:     'apex_rk_mistral',
-    anthropic:   'apex_rk_anthropic',
-    gemini:      'apex_rk_gemini',
-    ollama_url:  'apex_rk_ollama_url',
+  // ── Inject API keys into driver device localStorage ───────────
+  const keyMap = {
+    gh: 'apex_rk_graphhopper',
+    gm: 'apex_rk_google_maps',
+    mb: 'apex_rk_mapbox',
+    oa: 'apex_rk_openai',
+    or: 'apex_rk_openrouter',
+    gq: 'apex_rk_groq',
+    ds: 'apex_rk_deepseek',
+    ms: 'apex_rk_mistral',
+    an: 'apex_rk_anthropic',
+    gn: 'apex_rk_gemini',
+    ol: 'apex_rk_ollama_url',
   }
+  const keyLabels = { gh:'GraphHopper',gm:'Google Maps',mb:'Mapbox',oa:'OpenAI',or:'OpenRouter',gq:'Groq',ds:'DeepSeek',ms:'Mistral',an:'Anthropic',gn:'Gemini',ol:'Ollama' }
   const injectedKeys = []
-  Object.entries(LS_KEYS).forEach(([k, lsKey]) => {
-    if (apiKeys[k]) {
-      try { localStorage.setItem(lsKey, apiKeys[k]); injectedKeys.push(k) } catch {}
-    }
-  })
-
-  // ── Store pairing record for driver app to read ───────────────
-  writeJSON('apex:sync_pairing', {
-    code:        codes[idx].code,
-    driver_id:   codes[idx].driver_id,
-    driver_name: codes[idx].driver_name,
-    vehicle_reg: codes[idx].vehicle_reg,
-    paired_at:   tsNow(),
-    api_keys:    injectedKeys,   // list of key names injected (not values)
-    fleet_url:   typeof window !== 'undefined' ? window.location.origin : '',
-  })
-
-  // Register as active driver
-  const drivers = readJSON(ACTIVE_DRIVERS_KEY, {})
-  drivers[codes[idx].driver_id] = {
-    ...codes[idx],
-    online: true,
-    last_seen: tsNow(),
+  if (payload.k && typeof payload.k === 'object') {
+    Object.entries(payload.k).forEach(([k, val]) => {
+      if (val && keyMap[k]) {
+        try { localStorage.setItem(keyMap[k], val); injectedKeys.push(keyLabels[k] || k) } catch {}
+      }
+    })
   }
+
+  // ── Store pairing record on driver device ─────────────────────
+  const record = {
+    code,
+    driver_id:   driverId,
+    driver_name: driverName,
+    vehicle_reg: vehicleReg,
+    paired_at:   tsNow(),
+    expires_at:  new Date(payload.e * 1000).toISOString(),
+    api_keys:    injectedKeys,
+    status:      'active',
+  }
+  writeJSON('apex:sync_pairing', record)
+
+  // ── Register as active driver (for fleet live map) ────────────
+  const drivers = readJSON(ACTIVE_DRIVERS_KEY, {})
+  drivers[driverId] = { ...record, online: true, last_seen: tsNow() }
   writeJSON(ACTIVE_DRIVERS_KEY, drivers)
-  getChannel()?.postMessage({ type: 'DRIVER_PAIRED', record: codes[idx], injectedKeys })
-  return { ok: true, record: codes[idx], injectedKeys }
+
+  // ── Mark code as used on fleet side (best-effort, same device only) ──
+  try {
+    const codes = readJSON(PAIRING_CODES_KEY, [])
+    const updated = codes.map(c => c.code === code ? { ...c, status: 'active', paired_at: tsNow() } : c)
+    writeJSON(PAIRING_CODES_KEY, updated)
+  } catch {}
+
+  getChannel()?.postMessage({ type: 'DRIVER_PAIRED', record, injectedKeys })
+  return { ok: true, record, injectedKeys }
 }
+
+
 
 // ─── LOCATION / TELEMETRY PUSH (Driver → Fleet) ───────────────
 /**

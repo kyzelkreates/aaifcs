@@ -44,7 +44,7 @@ import { getRuntimeKey, RUNTIME_KEYS } from './services_maps_runtimeKeys'
 import { safetyService, ALERT_TYPE, ALERT_SEVERITY } from './services_safety_safetyService'
 import { mountDriverBridge } from './services_apex_apexBridge'
 import {
-  activateSyncCode, pushDriverLocation, pushAIReport,
+  activateSyncCode, decodeToken, pushDriverLocation, pushAIReport,
   subscribeToFleetCommands,
   getLiveDriverPositions,
   getDriverSyncPairing,
@@ -464,14 +464,14 @@ function SetupScreen({ onReady }) {
   const [checking, setChecking] = useState(false)
 
   const submitCode = () => {
-    const trimmed = code.trim().toUpperCase()
+    const trimmed = code.trim()
     setChecking(true); setErr('')
 
-    // Primary path: APEX-XXXXXXXX-XXXX-FC (fleet sync code via liveSync)
-    if (/^APEX-[A-Z0-9]{8}-[A-Z0-9]{4}-FC$/.test(trimmed)) {
-      const res = activateSyncCode(trimmed, null)   // will inject API keys automatically
+    // Primary path: APXS-<base64> self-contained token (fully cross-device)
+    if (trimmed.toUpperCase().startsWith('APXS-')) {
+      const res = activateSyncCode(trimmed, null)
       setChecking(false)
-      if (!res.ok) return setErr(res.error || 'Code invalid or expired. Get a new one from the fleet dashboard.')
+      if (!res.ok) return setErr(res.error || 'Code invalid or expired. Get a fresh one from the fleet dashboard.')
       const rec = res.record
       setPaired({ driverId: rec.driver_id, driverName: rec.driver_name, vehicleReg: rec.vehicle_reg, record: rec, injectedKeys: res.injectedKeys || [] })
       setName(rec.driver_name || '')
@@ -479,19 +479,8 @@ function SetupScreen({ onReady }) {
       return
     }
 
-    // Legacy DA path (backward compat — older generated codes)
-    if (/^APEX-[A-Z0-9]{8}-[A-Z0-9]{4}-DA$/.test(trimmed)) {
-      const result = validatePairingCode(trimmed)
-      setChecking(false)
-      if (!result.ok) return setErr(result.error || 'Code not found or expired.')
-      setPaired(result)
-      setName(result.driverName || '')
-      setStep('profile')
-      return
-    }
-
     setChecking(false)
-    setErr('Invalid format. Code must be APEX-XXXXXXXX-XXXX-FC — get it from the fleet dashboard.')
+    setErr('Invalid code. Make sure you copied the full code starting with APXS- from the fleet dashboard.')
   }
 
   const submitProfile = () => {
@@ -537,35 +526,35 @@ function SetupScreen({ onReady }) {
               <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">Fleet Sync Code</label>
               <input
                 value={code}
-                onChange={e => {
-                  const v = e.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, '')
-                  setCode(v.slice(0, 22))
-                }}
+                onChange={e => setCode(e.target.value)}
                 onPaste={e => {
                   e.preventDefault()
-                  const p = (e.clipboardData.getData('text') || '').trim().toUpperCase().replace(/[^A-Z0-9-]/g, '')
-                  setCode(p.slice(0, 22))
+                  const p = (e.clipboardData.getData('text') || '').trim()
+                  setCode(p)
                 }}
-                placeholder="APEX-XXXXXXXX-XXXX-FC"
-                type="text" autoCapitalize="characters" autoComplete="off" autoCorrect="off" spellCheck={false} autoFocus
+                placeholder="APXS-eyJ2IjoxL…"
+                type="text" autoCapitalize="off" autoComplete="off" autoCorrect="off" spellCheck={false} autoFocus
                 onKeyDown={e => e.key === 'Enter' && submitCode()}
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-3.5 text-base text-violet-300 placeholder-slate-800 focus:border-violet-500/60 focus:outline-none font-mono tracking-widest text-center"
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-3.5 text-sm text-violet-300 placeholder-slate-800 focus:border-violet-500/60 focus:outline-none font-mono break-all text-center"
               />
               {/* Live format indicator */}
               {code.length > 0 && (
                 <div className={`mt-1.5 text-2xs text-center ${
-                  /^APEX-[A-Z0-9]{8}-[A-Z0-9]{4}-FC$/.test(code) ? 'text-emerald-500' :
-                  code.length < 22 ? 'text-slate-700' : 'text-red-500'
+                  code.trim().toUpperCase().startsWith('APXS-') && code.length > 20 ? 'text-emerald-500' :
+                  !code.trim().toUpperCase().startsWith('APXS-') && code.length > 4 ? 'text-red-500' :
+                  'text-slate-700'
                 }`}>
-                  {/^APEX-[A-Z0-9]{8}-[A-Z0-9]{4}-FC$/.test(code) ? '✓ Valid code — tap Connect'
-                    : code.length < 22 ? `${22 - code.length} chars remaining`
-                    : '✗ Invalid — must be APEX-XXXXXXXX-XXXX-FC'}
+                  {code.trim().toUpperCase().startsWith('APXS-') && code.length > 20
+                    ? '✓ Valid code — tap Connect'
+                    : !code.trim().toUpperCase().startsWith('APXS-') && code.length > 4
+                    ? '✗ Code must start with APXS-'
+                    : 'Paste the full code from the fleet dashboard…'}
                 </div>
               )}
             </div>
             {err && <div className="text-xs text-red-400 bg-red-500/8 border border-red-500/20 rounded-lg px-3 py-2 flex items-center gap-1.5"><Icon name="AlertCircle" size={11} /> {err}</div>}
             <button onClick={submitCode}
-              disabled={!/^APEX-[A-Z0-9]{8}-[A-Z0-9]{4}-[FA][CD]$/.test(code) || checking}
+              disabled={!code.trim().toUpperCase().startsWith('APXS-') || code.trim().length < 20 || checking}
               className="w-full bg-violet-500 hover:bg-violet-600 active:bg-violet-700 disabled:opacity-30 disabled:cursor-not-allowed text-white font-semibold rounded-xl py-3 text-sm transition-colors flex items-center justify-center gap-2">
               <Icon name="Link" size={15} />
               {checking ? 'Connecting…' : 'Connect to Fleet'}
@@ -808,51 +797,30 @@ function DriverAppMain({ profile, onLogout }) {
 
   const submitFleetCode = useCallback(() => {
     setFleetLinkError('')
-    const trimmed = fleetLinkCode.trim().toUpperCase()
-    if (!trimmed) { setFleetLinkError('Enter your APEX sync code'); return }
+    const trimmed = fleetLinkCode.trim()
+    if (!trimmed) { setFleetLinkError('Paste your APXS sync code from the fleet dashboard'); return }
 
-    // Validate format: APEX-XXXXXXXX-XXXX-FC
-    const FC_REGEX = /^APEX-[A-F0-9]{8}-[A-F0-9]{4}-FC$/
-    const DA_REGEX = /^APEX-[A-F0-9]{8}-[A-F0-9]{4}-DA$/
-
-    if (!FC_REGEX.test(trimmed) && !DA_REGEX.test(trimmed)) {
-      setFleetLinkError('Invalid format. Code must be: APEX-XXXXXXXX-XXXX-FC')
+    if (!trimmed.toUpperCase().startsWith('APXS-')) {
+      setFleetLinkError('Invalid code — must start with APXS-. Copy the full code from the fleet dashboard.')
       return
     }
 
-    // Try liveSync activation (FC format — fleet dashboard generated)
-    if (FC_REGEX.test(trimmed)) {
-      const res = activateSyncCode(trimmed, {
-        id:         profile.id,
-        full_name:  profile.full_name,
-        vehicle_reg: profile.vehicle_reg,
-      })
-      if (!res.ok) {
-        setFleetLinkError(res.error || 'Code invalid or expired — ask fleet ops for a new one')
-        return
-      }
-      // API keys injected automatically by activateSyncCode
-      const injected = res.injectedKeys || []
-      setFleetLinkSuccess(true)
-      setFleetLinkCode('')
-      setTimeout(() => {
-        setJobs(loadJobs(profile.id))
-        setShowFleetConnect(false)
-        setFleetLinkSuccess(false)
-      }, 2500)
+    const res = activateSyncCode(trimmed, {
+      id:          profile.id,
+      full_name:   profile.full_name,
+      vehicle_reg: profile.vehicle_reg,
+    })
+    if (!res.ok) {
+      setFleetLinkError(res.error || 'Code invalid or expired — ask fleet ops for a new one')
       return
     }
-
-    // Legacy DA path (backward compat)
-    const result = validatePairingCode(trimmed)
-    if (!result.ok) { setFleetLinkError(result.error || 'Code not found or expired'); return }
     setFleetLinkSuccess(true)
     setFleetLinkCode('')
     setTimeout(() => {
       setJobs(loadJobs(profile.id))
       setShowFleetConnect(false)
       setFleetLinkSuccess(false)
-    }, 2000)
+    }, 2500)
   }, [fleetLinkCode, profile])
 
   // ── GPS watch ────────────────────────────────────────────────
@@ -1973,37 +1941,34 @@ function DriverAppMain({ profile, onLogout }) {
               </div>
 
               {/* Code input — full APEX-XXXXXXXX-XXXX-FC format */}
-              <input
+              <textarea
                 value={fleetLinkCode}
-                onChange={e => {
-                  // Allow typing the full code — uppercase, keep dashes
-                  const raw = e.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, '')
-                  setFleetLinkCode(raw.slice(0, 22))  // APEX-12345678-1234-FC = 22 chars
-                }}
+                onChange={e => setFleetLinkCode(e.target.value)}
                 onPaste={e => {
                   e.preventDefault()
-                  const pasted = (e.clipboardData.getData('text') || '').trim().toUpperCase().replace(/[^A-Z0-9-]/g, '')
-                  setFleetLinkCode(pasted.slice(0, 22))
+                  const pasted = (e.clipboardData.getData('text') || '').trim()
+                  setFleetLinkCode(pasted)
                 }}
-                placeholder="APEX-XXXXXXXX-XXXX-FC"
-                autoCapitalize="characters"
+                placeholder="Paste APXS-… code from fleet dashboard"
+                autoCapitalize="off"
                 autoCorrect="off"
                 spellCheck={false}
-                maxLength={22}
-                className="w-full bg-slate-950 border border-slate-700/60 rounded-xl px-4 py-3.5 text-sm font-mono tracking-wider text-violet-300 placeholder-slate-700 text-center focus:border-violet-500/60 focus:outline-none focus:ring-1 focus:ring-violet-500/20"
+                rows={3}
+                className="w-full bg-slate-950 border border-slate-700/60 rounded-xl px-4 py-3 text-xs font-mono text-violet-300 placeholder-slate-700 focus:border-violet-500/60 focus:outline-none focus:ring-1 focus:ring-violet-500/20 resize-none leading-relaxed"
               />
 
               {/* Live format validation indicator */}
               {fleetLinkCode.length > 0 && (
                 <div className={`text-2xs flex items-center gap-1.5 ${
-                  /^APEX-[A-F0-9]{8}-[A-F0-9]{4}-FC$/.test(fleetLinkCode) ? 'text-emerald-400' :
-                  fleetLinkCode.length < 22 ? 'text-slate-600' : 'text-red-400'
+                  fleetLinkCode.trim().toUpperCase().startsWith('APXS-') && fleetLinkCode.trim().length > 20 ? 'text-emerald-400' :
+                  !fleetLinkCode.trim().toUpperCase().startsWith('APXS-') && fleetLinkCode.trim().length > 4 ? 'text-red-400' :
+                  'text-slate-600'
                 }`}>
-                  {/^APEX-[A-F0-9]{8}-[A-F0-9]{4}-FC$/.test(fleetLinkCode)
-                    ? <><Icon name="CheckCircle2" size={11} /> Valid format — ready to connect</>
-                    : fleetLinkCode.length < 22
-                      ? <><Icon name="Loader2" size={11} /> {22 - fleetLinkCode.length} characters remaining…</>
-                      : <><Icon name="XCircle" size={11} /> Invalid format — must be APEX-XXXXXXXX-XXXX-FC</>
+                  {fleetLinkCode.trim().toUpperCase().startsWith('APXS-') && fleetLinkCode.trim().length > 20
+                    ? <><Icon name="CheckCircle2" size={11} /> Valid — ready to connect</>
+                    : !fleetLinkCode.trim().toUpperCase().startsWith('APXS-') && fleetLinkCode.trim().length > 4
+                    ? <><Icon name="XCircle" size={11} /> Must start with APXS-</>
+                    : <><Icon name="Loader2" size={11} /> Paste the full code…</>
                   }
                 </div>
               )}
@@ -2028,7 +1993,7 @@ function DriverAppMain({ profile, onLogout }) {
 
               <button
                 onClick={submitFleetCode}
-                disabled={!/^APEX-[A-F0-9]{8}-[A-F0-9]{4}-F[CA]$/.test(fleetLinkCode)}
+                disabled={!fleetLinkCode.trim().toUpperCase().startsWith('APXS-') || fleetLinkCode.trim().length < 20}
                 className="w-full py-2.5 rounded-xl bg-violet-500 hover:bg-violet-600 active:bg-violet-700 disabled:opacity-30 disabled:cursor-not-allowed text-white text-sm font-semibold transition-colors flex items-center justify-center gap-2">
                 <Icon name="Link" size={14} /> Connect to Fleet
               </button>
