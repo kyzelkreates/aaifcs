@@ -161,224 +161,455 @@ function FleetPanel() {
   )
 }
 
+
 function AIPanel() {
   const { provider, setProvider, model, setModel } = useAIStore(s => ({
     provider: s.provider, setProvider: s.setProvider,
-    model: s.model, setModel: s.setModel
+    model:    s.model,    setModel:    s.setModel,
   }))
 
-  const PROVIDERS_LIST = [
-    { id: 'openai',     label: 'OpenAI',          rk: 'openai',     models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo'],                placeholder: 'sk-...' },
-    { id: 'openrouter', label: 'OpenRouter',       rk: 'openrouter', models: ['anthropic/claude-3.5-sonnet', 'google/gemini-pro', 'meta-llama/llama-3-70b'], placeholder: 'sk-or-...' },
-    { id: 'groq',       label: 'Groq',             rk: 'groq',       models: ['llama-3.3-70b-versatile', 'mixtral-8x7b-32768', 'gemma2-9b-it'],      placeholder: 'gsk_...' },
-    { id: 'deepseek',   label: 'DeepSeek',         rk: 'deepseek',   models: ['deepseek-chat', 'deepseek-reasoner'],                                   placeholder: 'sk-...' },
-    { id: 'mistral',    label: 'Mistral AI',       rk: 'mistral',    models: ['mistral-large-latest', 'mistral-small-latest', 'open-mixtral-8x22b'],   placeholder: 'your-mistral-key' },
-    { id: 'claude',     label: 'Anthropic Claude', rk: 'anthropic',  models: ['claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022'],              placeholder: 'sk-ant-...' },
-    { id: 'gemini',     label: 'Google Gemini',    rk: 'gemini',     models: ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash'],              placeholder: 'AIza...' },
-    { id: 'ollama',     label: 'Ollama (Local)',   rk: null,         models: ['llama3.2', 'llama3.1', 'mistral', 'phi3', 'gemma2', 'qwen2.5'],        placeholder: null },
+  // ── Provider catalogue ─────────────────────────────────────
+  const AI_PROVIDERS_CFG = [
+    {
+      id: 'openai', label: 'OpenAI', rk: RUNTIME_KEYS.OPENAI,
+      icon: 'Brain', color: 'text-emerald-400', bg: 'bg-emerald-500/8', border: 'border-emerald-500/20',
+      placeholder: 'sk-proj-…  or  sk-…',
+      keyUrl: 'https://platform.openai.com/api-keys',
+      keyLabel: 'platform.openai.com/api-keys',
+      models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo'],
+      testUrl: 'https://api.openai.com/v1/models',
+      testAuth: 'bearer',
+      desc: 'GPT-4o · GPT-4o-mini · GPT-4-turbo',
+    },
+    {
+      id: 'openrouter', label: 'OpenRouter', rk: RUNTIME_KEYS.OPENROUTER,
+      icon: 'GitBranch', color: 'text-violet-400', bg: 'bg-violet-500/8', border: 'border-violet-500/20',
+      placeholder: 'sk-or-v1-…',
+      keyUrl: 'https://openrouter.ai/keys',
+      keyLabel: 'openrouter.ai/keys',
+      models: ['anthropic/claude-3.5-sonnet', 'google/gemini-pro', 'meta-llama/llama-3-70b', 'openai/gpt-4o'],
+      testUrl: 'https://openrouter.ai/api/v1/models',
+      testAuth: 'bearer',
+      desc: 'Unified gateway — 300+ models',
+    },
+    {
+      id: 'groq', label: 'Groq', rk: RUNTIME_KEYS.GROQ,
+      icon: 'Zap', color: 'text-amber-400', bg: 'bg-amber-500/8', border: 'border-amber-500/20',
+      placeholder: 'gsk_…',
+      keyUrl: 'https://console.groq.com/keys',
+      keyLabel: 'console.groq.com/keys',
+      models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768', 'gemma2-9b-it'],
+      testUrl: 'https://api.groq.com/openai/v1/models',
+      testAuth: 'bearer',
+      desc: 'Ultra-fast inference — free tier available',
+    },
+    {
+      id: 'deepseek', label: 'DeepSeek', rk: RUNTIME_KEYS.DEEPSEEK,
+      icon: 'Search', color: 'text-blue-400', bg: 'bg-blue-500/8', border: 'border-blue-500/20',
+      placeholder: 'sk-…',
+      keyUrl: 'https://platform.deepseek.com',
+      keyLabel: 'platform.deepseek.com',
+      models: ['deepseek-chat', 'deepseek-reasoner'],
+      testUrl: 'https://api.deepseek.com/v1/models',
+      testAuth: 'bearer',
+      desc: 'DeepSeek-V3 · R1 Reasoner',
+    },
+    {
+      id: 'mistral', label: 'Mistral AI', rk: RUNTIME_KEYS.MISTRAL,
+      icon: 'Wind', color: 'text-orange-400', bg: 'bg-orange-500/8', border: 'border-orange-500/20',
+      placeholder: 'your-mistral-key',
+      keyUrl: 'https://console.mistral.ai/api-keys',
+      keyLabel: 'console.mistral.ai/api-keys',
+      models: ['mistral-large-latest', 'mistral-small-latest', 'open-mixtral-8x22b', 'codestral-latest'],
+      testUrl: 'https://api.mistral.ai/v1/models',
+      testAuth: 'bearer',
+      desc: 'Mistral Large · Codestral · Mixtral',
+    },
+    {
+      id: 'claude', label: 'Anthropic Claude', rk: RUNTIME_KEYS.ANTHROPIC,
+      icon: 'Shield', color: 'text-rose-400', bg: 'bg-rose-500/8', border: 'border-rose-500/20',
+      placeholder: 'sk-ant-api03-…',
+      keyUrl: 'https://console.anthropic.com/settings/keys',
+      keyLabel: 'console.anthropic.com/settings/keys',
+      models: ['claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022', 'claude-3-opus-20240229'],
+      testUrl: null,  // special — tested via messages endpoint
+      testAuth: 'anthropic',
+      desc: 'Claude 3.5 Sonnet · Haiku · Opus',
+    },
+    {
+      id: 'gemini', label: 'Google Gemini', rk: RUNTIME_KEYS.GEMINI,
+      icon: 'Sparkles', color: 'text-sky-400', bg: 'bg-sky-500/8', border: 'border-sky-500/20',
+      placeholder: 'AIzaSy…',
+      keyUrl: 'https://aistudio.google.com/app/apikey',
+      keyLabel: 'aistudio.google.com/app/apikey',
+      models: ['gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'],
+      testUrl: null,  // key goes in query param
+      testAuth: 'gemini',
+      desc: 'Gemini 2.0 Flash · 1.5 Pro · 1.5 Flash',
+    },
+    {
+      id: 'ollama', label: 'Ollama (Local)', rk: 'ollama_url',
+      icon: 'Server', color: 'text-slate-400', bg: 'bg-slate-500/8', border: 'border-slate-500/20',
+      placeholder: 'http://localhost:11434',
+      keyUrl: 'https://ollama.com',
+      keyLabel: 'ollama.com — install locally',
+      models: ['llama3.2', 'llama3.1', 'mistral', 'phi3', 'gemma2', 'qwen2.5', 'deepseek-r1'],
+      testUrl: null,
+      testAuth: 'ollama',
+      desc: 'Fully local — no API key required',
+      isUrl: true,
+    },
   ]
 
-  // Runtime key state — reads from localStorage via getRuntimeKey
-  const [keys, setKeys] = useState(() => {
+  // ── State ──────────────────────────────────────────────────
+  const [keys,     setKeys]     = useState(() => {
     const init = {}
-    PROVIDERS_LIST.forEach(p => {
-      init[p.id] = p.rk ? (getRuntimeKey(p.rk) || '') : ''
+    AI_PROVIDERS_CFG.forEach(p => {
+      init[p.id] = getRuntimeKey(p.rk) || ''
     })
     return init
   })
-  const [savedKey, setSavedKey] = useState(null)  // which provider just saved
-  const [showKey,  setShowKey]  = useState({})    // { providerId: bool }
+  const [saved,    setSaved]    = useState({})   // { id: bool }
+  const [showKey,  setShowKey]  = useState({})   // { id: bool }
   const [testing,  setTesting]  = useState(null)
-  const [testRes,  setTestRes]  = useState({})
+  const [testRes,  setTestRes]  = useState({})   // { id: 'ok'|'fail'|'no_key' }
+  const [saveAll,  setSaveAll]  = useState(false)
+  const [expanded, setExpanded] = useState({})   // { id: bool } — which cards are open
 
-  const handleKeyChange = (id, val) => {
-    setKeys(prev => ({ ...prev, [id]: val }))
-  }
+  // ── Helpers ────────────────────────────────────────────────
+  const handleChange = (id, val) => setKeys(prev => ({ ...prev, [id]: val }))
 
-  const handleSaveKey = (p) => {
-    if (!p.rk) return
+  const handleSave = (p) => {
     setRuntimeKey(p.rk, keys[p.id])
-    setSavedKey(p.id)
-    setTimeout(() => setSavedKey(null), 2000)
+    setSaved(prev => ({ ...prev, [p.id]: true }))
+    setTimeout(() => setSaved(prev => ({ ...prev, [p.id]: false })), 2200)
   }
 
-  const handleTestKey = async (p) => {
-    if (!p.rk) return
-    const key = keys[p.id] || getRuntimeKey(p.rk)
-    if (!key) { setTestRes(prev => ({ ...prev, [p.id]: 'no_key' })); return }
+  const handleSaveAll = () => {
+    AI_PROVIDERS_CFG.forEach(p => {
+      if (keys[p.id] !== undefined) setRuntimeKey(p.rk, keys[p.id])
+    })
+    setSaveAll(true)
+    setTimeout(() => setSaveAll(false), 2200)
+  }
+
+  const handleClear = (p) => {
+    setRuntimeKey(p.rk, '')
+    setKeys(prev => ({ ...prev, [p.id]: '' }))
+    setTestRes(prev => ({ ...prev, [p.id]: undefined }))
+  }
+
+  const handleTest = async (p) => {
+    const key = keys[p.id].trim() || getRuntimeKey(p.rk)
+    if (!key && p.id !== 'ollama') {
+      setTestRes(prev => ({ ...prev, [p.id]: 'no_key' }))
+      return
+    }
     setTesting(p.id)
     try {
       let ok = false
-      if (p.id === 'openai' || p.id === 'openrouter' || p.id === 'groq' || p.id === 'deepseek' || p.id === 'mistral') {
-        const endpoints = {
-          openai: 'https://api.openai.com/v1',
-          openrouter: 'https://openrouter.ai/api/v1',
-          groq: 'https://api.groq.com/openai/v1',
-          deepseek: 'https://api.deepseek.com/v1',
-          mistral: 'https://api.mistral.ai/v1',
-        }
-        const res = await fetch(`${endpoints[p.id]}/models`, {
-          headers: { 'Authorization': `Bearer ${key}` },
-          signal: AbortSignal.timeout(8000),
+      if (p.testAuth === 'bearer' && p.testUrl) {
+        const res = await fetch(p.testUrl, {
+          headers: { Authorization: `Bearer ${key}` },
+          signal: AbortSignal.timeout(9000),
         })
         ok = res.ok
-      } else if (p.id === 'claude') {
-        // Anthropic doesn't have /models — do a minimal messages call
+      } else if (p.testAuth === 'anthropic') {
         const res = await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST',
-          headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: 'claude-3-haiku-20240307', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
-          signal: AbortSignal.timeout(8000),
+          headers: {
+            'x-api-key': key,
+            'anthropic-version': '2023-06-01',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'claude-3-haiku-20240307', max_tokens: 1,
+            messages: [{ role: 'user', content: 'ping' }],
+          }),
+          signal: AbortSignal.timeout(9000),
         })
         ok = res.status !== 401 && res.status !== 403
-      } else if (p.id === 'gemini') {
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${key}`, {
-          signal: AbortSignal.timeout(8000),
-        })
+      } else if (p.testAuth === 'gemini') {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models?key=${key}`,
+          { signal: AbortSignal.timeout(9000) }
+        )
+        ok = res.ok
+      } else if (p.testAuth === 'ollama') {
+        const base = (keys[p.id].trim() || 'http://localhost:11434').replace(/\/$/, '')
+        const res = await fetch(`${base}/api/tags`, { signal: AbortSignal.timeout(5000) })
         ok = res.ok
       }
       setTestRes(prev => ({ ...prev, [p.id]: ok ? 'ok' : 'fail' }))
-    } catch (e) {
+    } catch {
       setTestRes(prev => ({ ...prev, [p.id]: 'fail' }))
     } finally {
       setTesting(null)
     }
   }
 
-  const currentModels = PROVIDERS_LIST.find(p => p.id === provider)?.models || []
-  const hasAnyKey = PROVIDERS_LIST.some(p => p.rk && !!getRuntimeKey(p.rk))
+  const toggleExpand = (id) => setExpanded(prev => ({ ...prev, [id]: !prev[id] }))
 
+  const configuredCount = AI_PROVIDERS_CFG.filter(p => !!getRuntimeKey(p.rk)).length
+  const currentModels   = AI_PROVIDERS_CFG.find(p => p.id === provider)?.models || []
+
+  // ── Render ─────────────────────────────────────────────────
   return (
     <div className="space-y-0">
-      <SectionHead label="AI Provider" />
 
-      {/* No-key banner */}
-      {!hasAnyKey && (
-        <div className="mb-4 flex items-start gap-3 p-3 rounded-lg bg-amber-500/8 border border-amber-500/20">
-          <Icon name="AlertTriangle" size={15} className="text-amber-400 mt-0.5 flex-shrink-0" />
+      {/* ── Section header ── */}
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <SectionHead label="AI Provider Keys" />
+          <p className="text-2xs text-slate-600 mt-1">
+            {configuredCount > 0
+              ? <><span className="text-emerald-400 font-semibold">{configuredCount}</span> provider{configuredCount !== 1 ? 's' : ''} configured — keys stored locally in your browser</>
+              : 'No keys configured — add at least one provider key to enable AI features'}
+          </p>
+        </div>
+        <button
+          onClick={handleSaveAll}
+          className={`px-4 py-2 rounded-lg text-xs font-semibold transition-all flex items-center gap-2 flex-shrink-0 ${
+            saveAll
+              ? 'bg-emerald-500/20 border border-emerald-500/30 text-emerald-300'
+              : 'bg-cyan-500/15 border border-cyan-500/25 text-cyan-300 hover:bg-cyan-500/25'
+          }`}
+        >
+          <Icon name={saveAll ? 'CheckCircle2' : 'Save'} size={13} />
+          {saveAll ? 'All Saved!' : 'Save All'}
+        </button>
+      </div>
+
+      {/* ── No-key alert ── */}
+      {configuredCount === 0 && (
+        <div className="mb-5 flex items-start gap-3 p-4 rounded-xl bg-amber-500/6 border border-amber-500/20">
+          <Icon name="AlertTriangle" size={16} className="text-amber-400 mt-0.5 flex-shrink-0" />
           <div>
-            <p className="text-xs font-semibold text-amber-300">No AI Keys Configured</p>
-            <p className="text-2xs text-amber-400/70 mt-0.5">Enter at least one API key below to enable AI features. All keys are stored locally in your browser.</p>
+            <p className="text-sm font-semibold text-amber-300 mb-1">AI Features Disabled</p>
+            <p className="text-xs text-amber-400/70 leading-relaxed">
+              Enter at least one API key below. <strong className="text-amber-300">Groq</strong> has a generous free tier —
+              create an account at <a href="https://console.groq.com/keys" target="_blank" rel="noopener noreferrer"
+                className="underline text-amber-300 hover:text-amber-200">console.groq.com/keys</a> and paste the key to get started instantly.
+            </p>
           </div>
         </div>
       )}
 
-      {/* Provider + key cards */}
-      <div className="space-y-3 mb-6">
-        {PROVIDERS_LIST.map(p => {
-          const hasKey    = p.rk ? !!getRuntimeKey(p.rk) : true
-          const active    = provider === p.id
-          const tr        = testRes[p.id]
-          const keyVal    = keys[p.id] || ''
-          const keyVisible = showKey[p.id]
+      {/* ── Provider cards ── */}
+      <div className="space-y-2 mb-6">
+        {AI_PROVIDERS_CFG.map(p => {
+          const storedKey  = getRuntimeKey(p.rk)
+          const hasKey     = !!storedKey
+          const isActive   = provider === p.id
+          const tr         = testRes[p.id]
+          const isExpanded = expanded[p.id] !== false  // default open
+          const keyVal     = keys[p.id] ?? ''
+          const isTesting  = testing === p.id
+
           return (
-            <div key={p.id} className={`rounded-xl border transition-all overflow-hidden ${
-              active
-                ? 'bg-cyan-500/5 border-cyan-500/25'
-                : 'bg-slate-900/40 border-slate-800/60 hover:border-slate-700/60'
+            <div key={p.id} className={`rounded-xl border overflow-hidden transition-all ${
+              isActive
+                ? `${p.bg} ${p.border}`
+                : hasKey
+                  ? 'bg-slate-900/50 border-slate-700/50 hover:border-slate-600/60'
+                  : 'bg-slate-900/30 border-slate-800/50 hover:border-slate-700/40'
             }`}>
-              {/* Header row */}
-              <div className="flex items-center gap-3 p-3">
-                <button
-                  onClick={() => { setProvider(p.id); setModel(p.models[0]) }}
-                  className="flex-1 flex items-center gap-3 text-left"
-                >
-                  <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                    hasKey
-                      ? tr === 'ok'   ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.7)]'
-                        : tr === 'fail' ? 'bg-red-400'
-                        : 'bg-emerald-400/70'
-                      : 'bg-slate-600'
-                  }`} />
-                  <span className={`text-sm font-medium ${active ? 'text-cyan-400' : 'text-white'}`}>{p.label}</span>
-                  {active && <span className="text-2xs text-cyan-500 bg-cyan-500/10 px-1.5 py-0.5 rounded font-medium">Active</span>}
-                  {!hasKey && p.rk && <span className="text-2xs text-slate-600 ml-auto">No key</span>}
-                  {hasKey && tr === 'ok'   && <span className="text-2xs text-emerald-400 ml-auto">✓ Verified</span>}
-                  {hasKey && tr === 'fail' && <span className="text-2xs text-red-400 ml-auto">✗ Failed</span>}
-                  {hasKey && tr === 'no_key' && <span className="text-2xs text-amber-400 ml-auto">Enter key first</span>}
-                </button>
-                {p.rk && (
-                  <div className="flex items-center gap-1.5 flex-shrink-0">
-                    <button
-                      onClick={() => handleTestKey(p)}
-                      disabled={testing === p.id}
-                      className="px-2 py-1 rounded-md text-2xs text-slate-400 hover:text-slate-200 bg-slate-800/50 hover:bg-slate-700/50 border border-slate-700/40 transition-colors disabled:opacity-50"
-                    >
-                      {testing === p.id ? <Icon name="Loader2" size={10} className="animate-spin" /> : 'Test'}
-                    </button>
+
+              {/* ── Card header ── */}
+              <div className="flex items-center gap-3 px-4 py-3">
+                {/* Status dot */}
+                <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${
+                  tr === 'ok'   ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]' :
+                  tr === 'fail' ? 'bg-red-400' :
+                  hasKey        ? 'bg-emerald-400/60' :
+                                  'bg-slate-700'
+                }`} />
+
+                {/* Provider icon + name */}
+                <div className="flex-1 flex items-center gap-3 min-w-0">
+                  <div className={`w-7 h-7 rounded-lg ${p.bg} border ${p.border} flex items-center justify-center flex-shrink-0`}>
+                    <Icon name={p.icon} size={14} className={p.color} />
                   </div>
-                )}
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className={`text-sm font-semibold ${isActive ? p.color : 'text-white'}`}>{p.label}</span>
+                      {isActive && (
+                        <span className={`text-2xs px-1.5 py-0.5 rounded ${p.bg} border ${p.border} ${p.color} font-semibold`}>
+                          Active
+                        </span>
+                      )}
+                      {hasKey && tr !== 'ok' && tr !== 'fail' && (
+                        <span className="text-2xs text-emerald-400/80">Key set</span>
+                      )}
+                      {tr === 'ok'   && <span className="text-2xs text-emerald-400 font-medium">✓ Verified</span>}
+                      {tr === 'fail' && <span className="text-2xs text-red-400 font-medium">✗ Invalid key</span>}
+                      {tr === 'no_key' && <span className="text-2xs text-amber-400 font-medium">Enter a key first</span>}
+                    </div>
+                    <p className="text-2xs text-slate-600 truncate">{p.desc}</p>
+                  </div>
+                </div>
+
+                {/* Action buttons */}
+                <div className="flex items-center gap-1.5 flex-shrink-0">
+                  {/* Set as active */}
+                  {!isActive && (
+                    <button
+                      onClick={() => { setProvider(p.id); setModel(p.models[0]) }}
+                      className="px-2.5 py-1.5 rounded-lg text-2xs font-medium text-slate-500 hover:text-slate-200 bg-slate-800/40 hover:bg-slate-700/60 border border-slate-700/30 transition-colors"
+                    >
+                      Set Active
+                    </button>
+                  )}
+                  {/* Test */}
+                  <button
+                    onClick={() => handleTest(p)}
+                    disabled={isTesting}
+                    className="px-2.5 py-1.5 rounded-lg text-2xs font-medium text-slate-400 hover:text-slate-200 bg-slate-800/40 hover:bg-slate-700/60 border border-slate-700/30 transition-colors disabled:opacity-40"
+                  >
+                    {isTesting
+                      ? <Icon name="Loader2" size={11} className="animate-spin" />
+                      : 'Test'}
+                  </button>
+                  {/* Expand toggle */}
+                  <button
+                    onClick={() => toggleExpand(p.id)}
+                    className="w-7 h-7 rounded-lg text-slate-600 hover:text-slate-300 bg-slate-800/40 hover:bg-slate-700/60 border border-slate-700/30 flex items-center justify-center transition-colors"
+                  >
+                    <Icon name={isExpanded ? 'ChevronUp' : 'ChevronDown'} size={13} />
+                  </button>
+                </div>
               </div>
 
-              {/* Key input */}
-              {p.rk && (
-                <div className="px-3 pb-3">
-                  <div className="flex gap-2">
-                    <div className="relative flex-1">
-                      <input
-                        type={keyVisible ? 'text' : 'password'}
-                        value={keyVal}
-                        onChange={e => handleKeyChange(p.id, e.target.value)}
-                        onKeyDown={e => { if (e.key === 'Enter') handleSaveKey(p) }}
-                        placeholder={p.placeholder || 'Enter API key…'}
-                        autoComplete="off"
-                        className="w-full bg-slate-800/60 border border-slate-700/50 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-600 font-mono focus:border-cyan-500/50 focus:outline-none pr-8"
-                      />
+              {/* ── Expanded: key input ── */}
+              {isExpanded && (
+                <div className="px-4 pb-4 border-t border-slate-800/40 pt-3 space-y-3">
+
+                  {/* Key / URL input row */}
+                  <div>
+                    <label className="text-2xs text-slate-500 font-medium mb-1.5 block">
+                      {p.isUrl ? 'Base URL' : 'API Key'}
+                    </label>
+                    <div className="flex gap-2">
+                      <div className="relative flex-1">
+                        <input
+                          type={showKey[p.id] || p.isUrl ? 'text' : 'password'}
+                          value={keyVal}
+                          onChange={e => handleChange(p.id, e.target.value)}
+                          onKeyDown={e => { if (e.key === 'Enter') { handleSave(p); e.target.blur() } }}
+                          placeholder={p.placeholder}
+                          autoComplete="off"
+                          spellCheck={false}
+                          className={`w-full bg-slate-800/70 border rounded-lg px-3 py-2.5 text-xs text-white placeholder-slate-700 font-mono focus:outline-none transition-colors ${
+                            tr === 'ok'   ? 'border-emerald-500/40 focus:border-emerald-500/60' :
+                            tr === 'fail' ? 'border-red-500/40 focus:border-red-500/60' :
+                                            'border-slate-700/60 focus:border-cyan-500/50'
+                          } ${p.isUrl ? '' : 'pr-9'}`}
+                        />
+                        {!p.isUrl && (
+                          <button
+                            onClick={() => setShowKey(prev => ({ ...prev, [p.id]: !prev[p.id] }))}
+                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-700 hover:text-slate-400 transition-colors"
+                          >
+                            <Icon name={showKey[p.id] ? 'EyeOff' : 'Eye'} size={13} />
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Save */}
                       <button
-                        onClick={() => setShowKey(prev => ({ ...prev, [p.id]: !prev[p.id] }))}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-600 hover:text-slate-400 transition-colors"
+                        onClick={() => handleSave(p)}
+                        className={`px-4 py-2.5 rounded-lg text-xs font-semibold transition-all flex-shrink-0 flex items-center gap-1.5 ${
+                          saved[p.id]
+                            ? 'bg-emerald-500/20 border border-emerald-500/30 text-emerald-300'
+                            : 'bg-cyan-500/15 border border-cyan-500/25 text-cyan-300 hover:bg-cyan-500/25 active:scale-95'
+                        }`}
                       >
-                        <Icon name={keyVisible ? 'EyeOff' : 'Eye'} size={12} />
+                        <Icon name={saved[p.id] ? 'Check' : 'Save'} size={12} />
+                        {saved[p.id] ? 'Saved' : 'Save'}
                       </button>
+
+                      {/* Clear */}
+                      {hasKey && (
+                        <button
+                          onClick={() => handleClear(p)}
+                          className="px-3 py-2.5 rounded-lg text-xs text-slate-600 hover:text-red-400 bg-slate-800/40 hover:bg-red-500/8 border border-slate-700/30 hover:border-red-500/20 transition-all flex-shrink-0"
+                          title="Clear key"
+                        >
+                          <Icon name="Trash2" size={13} />
+                        </button>
+                      )}
                     </div>
-                    <button
-                      onClick={() => handleSaveKey(p)}
-                      className={`px-3 py-2 rounded-lg text-xs font-semibold transition-all flex-shrink-0 ${
-                        savedKey === p.id
-                          ? 'bg-emerald-500/20 border border-emerald-500/30 text-emerald-300'
-                          : 'bg-cyan-500/15 border border-cyan-500/25 text-cyan-300 hover:bg-cyan-500/25'
-                      }`}
-                    >
-                      {savedKey === p.id ? '✓' : 'Save'}
-                    </button>
+
+                    {/* Subtext */}
+                    <div className="flex items-center justify-between mt-2">
+                      <p className="text-2xs text-slate-800">
+                        {p.isUrl
+                          ? 'Ollama must be running locally with CORS enabled'
+                          : 'Stored in browser localStorage · encrypted at rest · never leaves your device'}
+                      </p>
+                      <a
+                        href={p.keyUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-2xs text-slate-700 hover:text-cyan-400 transition-colors font-mono flex items-center gap-1"
+                      >
+                        <Icon name="ExternalLink" size={10} />
+                        {p.keyLabel}
+                      </a>
+                    </div>
                   </div>
-                  <p className="text-2xs text-slate-700 mt-1.5">Stored locally in your browser · never sent to Apex servers</p>
+
+                  {/* Model selector (shown when this provider is active) */}
+                  {isActive && (
+                    <div className="pt-2 border-t border-slate-800/40">
+                      <label className="text-2xs text-slate-500 font-medium mb-1.5 block">Active Model</label>
+                      <select
+                        value={model || ''}
+                        onChange={e => setModel(e.target.value)}
+                        className="w-full bg-slate-800/70 border border-slate-700/60 rounded-lg px-3 py-2 text-xs text-white focus:border-cyan-500/50 focus:outline-none"
+                      >
+                        {p.models.map(m => <option key={m} value={m}>{m}</option>)}
+                      </select>
+                    </div>
+                  )}
                 </div>
-              )}
-              {!p.rk && (
-                <p className="px-3 pb-3 text-2xs text-slate-600">No key needed — runs on your local machine</p>
               )}
             </div>
           )
         })}
       </div>
 
-      <SectionHead label="Active Model" />
-      <SettingRow label="Model" sub="Used for all AI modules when no module-specific model is set">
-        <select value={model || ''} onChange={e => setModel(e.target.value)} className="apex-input w-64 text-sm py-1.5">
-          {currentModels.map(m => <option key={m} value={m}>{m}</option>)}
-        </select>
-      </SettingRow>
-
-      <SectionHead label="Key Quick-Reference" />
-      <div className="bg-slate-900/40 border border-slate-800/60 rounded-lg p-4 space-y-1.5">
-        <p className="text-2xs text-slate-600 mb-3">Where to get API keys:</p>
-        {[
-          ['OpenAI',     'platform.openai.com/api-keys'],
-          ['OpenRouter', 'openrouter.ai/keys'],
-          ['Groq',       'console.groq.com/keys'],
-          ['DeepSeek',   'platform.deepseek.com'],
-          ['Mistral',    'console.mistral.ai/api-keys'],
-          ['Anthropic',  'console.anthropic.com/settings/keys'],
-          ['Gemini',     'aistudio.google.com/app/apikey'],
-        ].map(([name, url]) => (
-          <div key={name} className="flex items-center justify-between text-2xs">
-            <span className="text-slate-500">{name}</span>
-            <a href={`https://${url}`} target="_blank" rel="noopener noreferrer"
-              className="text-cyan-500/70 hover:text-cyan-400 font-mono truncate max-w-[220px]">{url}</a>
-          </div>
-        ))}
+      {/* ── Fallback chain info ── */}
+      <div className="rounded-xl border border-slate-800/50 bg-slate-900/30 p-4 space-y-3">
+        <div className="flex items-center gap-2">
+          <Icon name="GitBranch" size={13} className="text-slate-500" />
+          <span className="text-xs font-semibold text-slate-400">Automatic Fallback Chain</span>
+        </div>
+        <p className="text-2xs text-slate-600 leading-relaxed">
+          If the active provider fails, Apex AI automatically tries the next available provider in order.
+          Providers with 3+ consecutive failures enter a 5-minute cooldown before retrying.
+          Configure multiple keys for maximum AI uptime.
+        </p>
+        <div className="flex items-center gap-2 flex-wrap">
+          {AI_PROVIDERS_CFG.filter(p => p.id !== 'ollama').map((p, i) => {
+            const active = !!getRuntimeKey(p.rk)
+            return (
+              <div key={p.id} className="flex items-center gap-1.5">
+                {i > 0 && <Icon name="ChevronRight" size={11} className="text-slate-800" />}
+                <div className={`flex items-center gap-1 text-2xs px-2 py-1 rounded-md border ${
+                  active
+                    ? `${p.bg} ${p.border} ${p.color}`
+                    : 'bg-slate-900/60 border-slate-800/40 text-slate-700'
+                }`}>
+                  <div className={`w-1.5 h-1.5 rounded-full ${active ? 'bg-current' : 'bg-slate-800'}`} />
+                  {p.label}
+                </div>
+              </div>
+            )
+          })}
+        </div>
       </div>
+
     </div>
   )
 }

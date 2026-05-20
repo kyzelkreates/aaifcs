@@ -236,8 +236,8 @@ export const aiRouter = {
         return { content: data.choices[0].message.content, provider: 'gemini', model: model || 'gemini-1.5-flash' }
       }
       case 'ollama': {
-        const base = env.VITE_OLLAMA_BASE_URL || 'http://localhost:11434'
-        body.model = model || 'llama3'
+        const base = (getRuntimeKey('ollama_url') || import.meta.env.VITE_OLLAMA_BASE_URL || 'http://localhost:11434').replace(/\/+$/, '')
+        body.model = model || 'llama3.2'
         const data = await callOpenAI(`${base}/api`, null, body)
         return { content: data.choices[0].message.content, provider: 'ollama', model: body.model }
       }

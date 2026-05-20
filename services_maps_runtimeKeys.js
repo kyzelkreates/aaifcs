@@ -22,6 +22,7 @@ export const RUNTIME_KEYS = {
   MISTRAL:     'mistral',
   ANTHROPIC:   'anthropic',
   GEMINI:      'gemini',
+  OLLAMA_URL:  'ollama_url',
 }
 
 /** Get a runtime key, falling back to env var */
@@ -42,6 +43,7 @@ export function getRuntimeKey(keyId) {
     [RUNTIME_KEYS.MISTRAL]:     import.meta.env.VITE_MISTRAL_API_KEY,
     [RUNTIME_KEYS.ANTHROPIC]:   import.meta.env.VITE_ANTHROPIC_API_KEY,
     [RUNTIME_KEYS.GEMINI]:      import.meta.env.VITE_GEMINI_API_KEY,
+    [RUNTIME_KEYS.OLLAMA_URL]:  import.meta.env.VITE_OLLAMA_BASE_URL,
   }
   return ENV_MAP[keyId] || ''
 }
