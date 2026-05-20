@@ -47,6 +47,7 @@ import {
   activateSyncCode, pushDriverLocation, pushAIReport,
   subscribeToFleetCommands,
   getLiveDriverPositions,
+  getDriverSyncPairing,
 } from './services_sync_liveSync'
 
 
@@ -464,30 +465,33 @@ function SetupScreen({ onReady }) {
 
   const submitCode = () => {
     const trimmed = code.trim().toUpperCase()
-    // Accept APEX-…-FC (new liveSync) or APEX-…-DA (legacy pairing)
-    if (!/^APEX-[A-Z0-9]{4,8}-[A-Z0-9]{4}-[A-Z]{2}$/.test(trimmed)) {
-      return setErr('Enter your full APEX-… sync code (check with your fleet operator)')
-    }
     setChecking(true); setErr('')
 
-    // Try new liveSync activation first (FC codes)
-    if (trimmed.endsWith('-FC')) {
-      const res = activateSyncCode(trimmed, null)
+    // Primary path: APEX-XXXXXXXX-XXXX-FC (fleet sync code via liveSync)
+    if (/^APEX-[A-Z0-9]{8}-[A-Z0-9]{4}-FC$/.test(trimmed)) {
+      const res = activateSyncCode(trimmed, null)   // will inject API keys automatically
       setChecking(false)
-      if (!res.ok) return setErr(res.error || 'Invalid or expired code')
-      setPaired({ driverId: res.record.driver_id, driverName: res.record.driver_name, vehicleReg: res.record.vehicle_reg, record: res.record })
-      setName(res.record.driver_name || '')
+      if (!res.ok) return setErr(res.error || 'Code invalid or expired. Get a new one from the fleet dashboard.')
+      const rec = res.record
+      setPaired({ driverId: rec.driver_id, driverName: rec.driver_name, vehicleReg: rec.vehicle_reg, record: rec, injectedKeys: res.injectedKeys || [] })
+      setName(rec.driver_name || '')
       setStep('profile')
       return
     }
 
-    // Legacy DA code path
-    const result = validatePairingCode(trimmed)
+    // Legacy DA path (backward compat — older generated codes)
+    if (/^APEX-[A-Z0-9]{8}-[A-Z0-9]{4}-DA$/.test(trimmed)) {
+      const result = validatePairingCode(trimmed)
+      setChecking(false)
+      if (!result.ok) return setErr(result.error || 'Code not found or expired.')
+      setPaired(result)
+      setName(result.driverName || '')
+      setStep('profile')
+      return
+    }
+
     setChecking(false)
-    if (!result.ok) return setErr(result.error)
-    setPaired(result)
-    setName(result.driverName || '')
-    setStep('profile')
+    setErr('Invalid format. Code must be APEX-XXXXXXXX-XXXX-FC — get it from the fleet dashboard.')
   }
 
   const submitProfile = () => {
@@ -523,35 +527,66 @@ function SetupScreen({ onReady }) {
             <div className="flex items-start gap-3 p-3 rounded-xl bg-violet-500/5 border border-violet-500/20">
               <Icon name="ShieldCheck" size={16} className="text-violet-400 flex-shrink-0 mt-0.5" />
               <div className="text-xs text-slate-400 leading-relaxed">
-                Ask your fleet manager for your <span className="text-violet-300 font-semibold">driver pairing code</span>.
-                It looks like <span className="font-mono text-violet-400">APEX-XXXXXXXX-XXXX-DA</span>. This links your device to the fleet — no access to fleet management systems.
+                Get your <span className="text-violet-300 font-semibold">fleet sync code</span> from the{' '}
+                <span className="text-violet-400 font-mono">Set Driver Up With App</span> section of the fleet dashboard.
+                Code format: <span className="font-mono text-violet-400">APEX-XXXXXXXX-XXXX-FC</span>.
+                Syncs jobs, maps &amp; AI access to this device.
               </div>
             </div>
             <div>
-              <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">Driver Pairing Code</label>
+              <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">Fleet Sync Code</label>
               <input
                 value={code}
-                onChange={e => setCode(e.target.value.toUpperCase().replace(/[^A-F0-9-]/g, '').slice(0, 22))}
-                placeholder="APEX-XXXXXXXX-XXXX-DA"
-                type="text" autoCapitalize="characters" autoFocus
+                onChange={e => {
+                  const v = e.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, '')
+                  setCode(v.slice(0, 22))
+                }}
+                onPaste={e => {
+                  e.preventDefault()
+                  const p = (e.clipboardData.getData('text') || '').trim().toUpperCase().replace(/[^A-Z0-9-]/g, '')
+                  setCode(p.slice(0, 22))
+                }}
+                placeholder="APEX-XXXXXXXX-XXXX-FC"
+                type="text" autoCapitalize="characters" autoComplete="off" autoCorrect="off" spellCheck={false} autoFocus
                 onKeyDown={e => e.key === 'Enter' && submitCode()}
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-3 text-sm text-violet-300 placeholder-slate-800 focus:border-violet-500 focus:outline-none font-mono tracking-wider text-center"
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-3.5 text-base text-violet-300 placeholder-slate-800 focus:border-violet-500/60 focus:outline-none font-mono tracking-widest text-center"
               />
+              {/* Live format indicator */}
+              {code.length > 0 && (
+                <div className={`mt-1.5 text-2xs text-center ${
+                  /^APEX-[A-Z0-9]{8}-[A-Z0-9]{4}-FC$/.test(code) ? 'text-emerald-500' :
+                  code.length < 22 ? 'text-slate-700' : 'text-red-500'
+                }`}>
+                  {/^APEX-[A-Z0-9]{8}-[A-Z0-9]{4}-FC$/.test(code) ? '✓ Valid code — tap Connect'
+                    : code.length < 22 ? `${22 - code.length} chars remaining`
+                    : '✗ Invalid — must be APEX-XXXXXXXX-XXXX-FC'}
+                </div>
+              )}
             </div>
-            {err && <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{err}</div>}
-            <button onClick={submitCode} disabled={!code.match(/^APEX-[A-F0-9]{8}-[A-F0-9]{4}-DA$/) || checking}
-              className="w-full bg-violet-500 hover:bg-violet-600 disabled:opacity-40 text-white font-semibold rounded-xl py-3 text-sm transition-colors">
-              {checking ? 'Verifying…' : 'Connect to Fleet'}
+            {err && <div className="text-xs text-red-400 bg-red-500/8 border border-red-500/20 rounded-lg px-3 py-2 flex items-center gap-1.5"><Icon name="AlertCircle" size={11} /> {err}</div>}
+            <button onClick={submitCode}
+              disabled={!/^APEX-[A-Z0-9]{8}-[A-Z0-9]{4}-[FA][CD]$/.test(code) || checking}
+              className="w-full bg-violet-500 hover:bg-violet-600 active:bg-violet-700 disabled:opacity-30 disabled:cursor-not-allowed text-white font-semibold rounded-xl py-3 text-sm transition-colors flex items-center justify-center gap-2">
+              <Icon name="Link" size={15} />
+              {checking ? 'Connecting…' : 'Connect to Fleet'}
             </button>
           </div>
         ) : (
           <div className="bg-[#0d1426] border border-emerald-500/20 rounded-2xl p-6 space-y-4">
-            <div className="flex items-center gap-2 p-3 rounded-xl bg-emerald-500/8 border border-emerald-500/20">
-              <Icon name="CheckCircle2" size={16} className="text-emerald-400 flex-shrink-0" />
-              <div>
-                <div className="text-xs font-semibold text-emerald-300">Code verified ✓</div>
-                <div className="text-2xs text-[#4a4f5a] font-mono">Vehicle: {paired?.vehicleReg || '—'}</div>
+            <div className="p-3 rounded-xl bg-emerald-500/8 border border-emerald-500/20 space-y-1.5">
+              <div className="flex items-center gap-2">
+                <Icon name="CheckCircle2" size={15} className="text-emerald-400 flex-shrink-0" />
+                <div className="text-xs font-semibold text-emerald-300">Fleet sync code verified ✓</div>
               </div>
+              <div className="text-2xs text-slate-600 font-mono">Vehicle: {paired?.vehicleReg || '—'}</div>
+              {paired?.injectedKeys?.length > 0 && (
+                <div className="text-2xs text-emerald-600">
+                  ✓ {paired.injectedKeys.length} API key{paired.injectedKeys.length > 1 ? 's' : ''} injected: {paired.injectedKeys.join(', ')}
+                </div>
+              )}
+              {(!paired?.injectedKeys || paired.injectedKeys.length === 0) && (
+                <div className="text-2xs text-amber-700">Maps & AI will use free tiers only — configure API keys in fleet Settings</div>
+              )}
             </div>
             <div>
               <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">Your Name</label>
@@ -773,20 +808,52 @@ function DriverAppMain({ profile, onLogout }) {
 
   const submitFleetCode = useCallback(() => {
     setFleetLinkError('')
-    const result = validatePairingCode(fleetLinkCode.trim())
-    if (!result.ok) {
-      setFleetLinkError(result.error)
+    const trimmed = fleetLinkCode.trim().toUpperCase()
+    if (!trimmed) { setFleetLinkError('Enter your APEX sync code'); return }
+
+    // Validate format: APEX-XXXXXXXX-XXXX-FC
+    const FC_REGEX = /^APEX-[A-F0-9]{8}-[A-F0-9]{4}-FC$/
+    const DA_REGEX = /^APEX-[A-F0-9]{8}-[A-F0-9]{4}-DA$/
+
+    if (!FC_REGEX.test(trimmed) && !DA_REGEX.test(trimmed)) {
+      setFleetLinkError('Invalid format. Code must be: APEX-XXXXXXXX-XXXX-FC')
       return
     }
+
+    // Try liveSync activation (FC format — fleet dashboard generated)
+    if (FC_REGEX.test(trimmed)) {
+      const res = activateSyncCode(trimmed, {
+        id:         profile.id,
+        full_name:  profile.full_name,
+        vehicle_reg: profile.vehicle_reg,
+      })
+      if (!res.ok) {
+        setFleetLinkError(res.error || 'Code invalid or expired — ask fleet ops for a new one')
+        return
+      }
+      // API keys injected automatically by activateSyncCode
+      const injected = res.injectedKeys || []
+      setFleetLinkSuccess(true)
+      setFleetLinkCode('')
+      setTimeout(() => {
+        setJobs(loadJobs(profile.id))
+        setShowFleetConnect(false)
+        setFleetLinkSuccess(false)
+      }, 2500)
+      return
+    }
+
+    // Legacy DA path (backward compat)
+    const result = validatePairingCode(trimmed)
+    if (!result.ok) { setFleetLinkError(result.error || 'Code not found or expired'); return }
     setFleetLinkSuccess(true)
     setFleetLinkCode('')
-    // Reload jobs after linking
     setTimeout(() => {
       setJobs(loadJobs(profile.id))
       setShowFleetConnect(false)
       setFleetLinkSuccess(false)
     }, 2000)
-  }, [fleetLinkCode, profile.id])
+  }, [fleetLinkCode, profile])
 
   // ── GPS watch ────────────────────────────────────────────────
   useEffect(() => {
@@ -1852,6 +1919,31 @@ function DriverAppMain({ profile, onLogout }) {
       {tab === 'jobs' && (
         <div className="flex-1 overflow-y-auto scrollbar-none p-4 space-y-3">
 
+          {/* Fleet sync status banner */}
+          {(() => {
+            const sp = getDriverSyncPairing()
+            if (!sp) return null
+            return (
+              <div className="flex items-center gap-2.5 px-3 py-2 rounded-xl bg-emerald-500/8 border border-emerald-500/20">
+                <div className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)] flex-shrink-0 animate-pulse" />
+                <div className="flex-1 min-w-0">
+                  <div className="text-2xs font-semibold text-emerald-300">Fleet Synced</div>
+                  <div className="text-2xs text-slate-600 truncate">
+                    {sp.api_keys?.length > 0
+                      ? `${sp.api_keys.length} API key${sp.api_keys.length > 1 ? 's' : ''} active · maps &amp; AI enabled`
+                      : 'Connected · OSM maps active'}
+                  </div>
+                </div>
+                <button
+                  onClick={() => { if (window.confirm('Disconnect from fleet?')) { localStorage.removeItem('apex:sync_pairing'); setJobs([]) } }}
+                  className="text-2xs text-slate-700 hover:text-red-400 transition-colors"
+                >
+                  <Icon name="Unlink" size={12} />
+                </button>
+              </div>
+            )
+          })()}
+
           {/* Fleet connect + refresh row */}
           <div className="flex gap-2">
             <button onClick={() => setJobs(loadJobs(profile.id))}
@@ -1862,41 +1954,88 @@ function DriverAppMain({ profile, onLogout }) {
             <button onClick={() => setShowFleetConnect(v => !v)}
               className="flex-1 flex items-center justify-center gap-2 py-2 rounded-xl border border-violet-500/25 bg-violet-500/5 text-violet-400 hover:bg-violet-500/10 text-xs font-semibold transition-colors">
               <Icon name="Link2" size={11} />
-              {showFleetConnect ? 'Cancel' : 'Link to Fleet'}
+              {showFleetConnect ? 'Cancel' : 'Sync with Fleet'}
             </button>
           </div>
 
-          {/* Fleet link code entry */}
+          {/* Fleet sync code entry */}
           {showFleetConnect && (
             <div className="bg-[#0d1426] border border-violet-500/20 rounded-xl p-4 space-y-3">
               <div className="flex items-start gap-2">
                 <Icon name="KeyRound" size={14} className="text-violet-400 flex-shrink-0 mt-0.5" />
                 <div>
-                  <div className="text-xs font-semibold text-white">Enter Fleet Pairing Code</div>
-                  <div className="text-2xs text-slate-500 mt-0.5">Get a 6-digit code from your fleet manager to receive jobs and connect to the fleet dashboard.</div>
+                  <div className="text-xs font-semibold text-white">Enter Fleet Sync Code</div>
+                  <div className="text-2xs text-slate-500 mt-0.5">
+                    Paste your <span className="font-mono text-violet-400">APEX-XXXXXXXX-XXXX-FC</span> code from the fleet dashboard.
+                    This syncs jobs, maps and AI provider access.
+                  </div>
                 </div>
               </div>
+
+              {/* Code input — full APEX-XXXXXXXX-XXXX-FC format */}
               <input
                 value={fleetLinkCode}
-                onChange={e => setFleetLinkCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                placeholder="000000"
-                inputMode="numeric" maxLength={6}
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 text-2xl font-mono tracking-[0.5em] text-[#4a4f5a] placeholder-slate-800 text-center focus:border-violet-500 focus:outline-none"
+                onChange={e => {
+                  // Allow typing the full code — uppercase, keep dashes
+                  const raw = e.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, '')
+                  setFleetLinkCode(raw.slice(0, 22))  // APEX-12345678-1234-FC = 22 chars
+                }}
+                onPaste={e => {
+                  e.preventDefault()
+                  const pasted = (e.clipboardData.getData('text') || '').trim().toUpperCase().replace(/[^A-Z0-9-]/g, '')
+                  setFleetLinkCode(pasted.slice(0, 22))
+                }}
+                placeholder="APEX-XXXXXXXX-XXXX-FC"
+                autoCapitalize="characters"
+                autoCorrect="off"
+                spellCheck={false}
+                maxLength={22}
+                className="w-full bg-slate-950 border border-slate-700/60 rounded-xl px-4 py-3.5 text-sm font-mono tracking-wider text-violet-300 placeholder-slate-700 text-center focus:border-violet-500/60 focus:outline-none focus:ring-1 focus:ring-violet-500/20"
               />
-              {fleetLinkError && (
-                <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{fleetLinkError}</div>
-              )}
-              {fleetLinkSuccess && (
-                <div className="text-xs text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-3 py-2">
-                  ✓ Linked to fleet as <span className="font-semibold">{profile.full_name}</span> · {profile.vehicle_reg}
+
+              {/* Live format validation indicator */}
+              {fleetLinkCode.length > 0 && (
+                <div className={`text-2xs flex items-center gap-1.5 ${
+                  /^APEX-[A-F0-9]{8}-[A-F0-9]{4}-FC$/.test(fleetLinkCode) ? 'text-emerald-400' :
+                  fleetLinkCode.length < 22 ? 'text-slate-600' : 'text-red-400'
+                }`}>
+                  {/^APEX-[A-F0-9]{8}-[A-F0-9]{4}-FC$/.test(fleetLinkCode)
+                    ? <><Icon name="CheckCircle2" size={11} /> Valid format — ready to connect</>
+                    : fleetLinkCode.length < 22
+                      ? <><Icon name="Loader2" size={11} /> {22 - fleetLinkCode.length} characters remaining…</>
+                      : <><Icon name="XCircle" size={11} /> Invalid format — must be APEX-XXXXXXXX-XXXX-FC</>
+                  }
                 </div>
               )}
+
+              {fleetLinkError && (
+                <div className="text-xs text-red-400 bg-red-500/8 border border-red-500/20 rounded-lg px-3 py-2 flex items-center gap-1.5">
+                  <Icon name="AlertCircle" size={12} /> {fleetLinkError}
+                </div>
+              )}
+
+              {fleetLinkSuccess && (
+                <div className="text-xs text-emerald-400 bg-emerald-500/8 border border-emerald-500/20 rounded-lg px-3 py-2 space-y-1">
+                  <div className="flex items-center gap-1.5 font-semibold">
+                    <Icon name="CheckCircle2" size={12} /> Connected to fleet!
+                  </div>
+                  <div className="text-2xs text-emerald-600">
+                    Synced as <span className="text-emerald-400">{profile.full_name}</span> · {profile.vehicle_reg} ·
+                    API keys, maps &amp; jobs are now active
+                  </div>
+                </div>
+              )}
+
               <button
                 onClick={submitFleetCode}
-                disabled={fleetLinkCode.length !== 6}
-                className="w-full py-2.5 rounded-xl bg-violet-500 hover:bg-violet-600 disabled:opacity-40 text-white text-sm font-semibold transition-colors">
-                Connect to Fleet
+                disabled={!/^APEX-[A-F0-9]{8}-[A-F0-9]{4}-F[CA]$/.test(fleetLinkCode)}
+                className="w-full py-2.5 rounded-xl bg-violet-500 hover:bg-violet-600 active:bg-violet-700 disabled:opacity-30 disabled:cursor-not-allowed text-white text-sm font-semibold transition-colors flex items-center justify-center gap-2">
+                <Icon name="Link" size={14} /> Connect to Fleet
               </button>
+
+              <div className="text-2xs text-slate-700 text-center">
+                Get this code from <span className="text-slate-600">Set Driver Up With App</span> in the fleet dashboard
+              </div>
             </div>
           )}
 

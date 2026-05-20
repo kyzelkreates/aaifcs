@@ -42,9 +42,37 @@ const writeJSON = (key, val) => {
  * Generate a new sync code: APEX-XXXXXXXX-XXXX-FC
  * Stores it in pairing codes list with 1-hour TTL
  */
-export function generateSyncCode(driverId = null, driverName = 'Driver', vehicleReg = '—', ttlMinutes = 60) {
-  const rand = () => Math.random().toString(36).toUpperCase().replace(/[^A-Z0-9]/g, '').padEnd(4, '0').slice(0, 4)
+export function generateSyncCode(driverId = null, driverName = 'Driver', vehicleReg = '—', ttlMinutes = 60, apiKeys = null) {
+  const rand = () => {
+    const hex = '0123456789ABCDEF'
+    let s = ''
+    for (let i = 0; i < 4; i++) s += hex[Math.floor(Math.random() * 16)]
+    return s
+  }
   const code = `APEX-${rand()}${rand()}-${rand()}-FC`
+
+  // Collect runtime API keys from localStorage to embed in sync record
+  const runtimeKeys = apiKeys || {}
+  const LS_KEYS = {
+    graphhopper: 'apex_rk_graphhopper',
+    google_maps: 'apex_rk_google_maps',
+    mapbox:      'apex_rk_mapbox',
+    openai:      'apex_rk_openai',
+    openrouter:  'apex_rk_openrouter',
+    groq:        'apex_rk_groq',
+    deepseek:    'apex_rk_deepseek',
+    mistral:     'apex_rk_mistral',
+    anthropic:   'apex_rk_anthropic',
+    gemini:      'apex_rk_gemini',
+    ollama_url:  'apex_rk_ollama_url',
+  }
+  if (!apiKeys) {
+    Object.entries(LS_KEYS).forEach(([k, lsKey]) => {
+      const val = localStorage.getItem(lsKey)
+      if (val) runtimeKeys[k] = val
+    })
+  }
+
   const record = {
     code,
     driver_id:   driverId || `guest-${Date.now()}`,
@@ -56,6 +84,7 @@ export function generateSyncCode(driverId = null, driverName = 'Driver', vehicle
     paired_at:   null,
     last_seen:   null,
     telemetry:   null,
+    api_keys:    runtimeKeys, // runtime keys forwarded to driver app
   }
   const codes = readJSON(PAIRING_CODES_KEY, [])
   // Remove expired
@@ -97,6 +126,39 @@ export function activateSyncCode(code, driverProfile) {
   }
   writeJSON(PAIRING_CODES_KEY, codes)
 
+  // ── Inject API keys from fleet dashboard into driver device ──
+  const apiKeys = codes[idx].api_keys || {}
+  const LS_KEYS = {
+    graphhopper: 'apex_rk_graphhopper',
+    google_maps: 'apex_rk_google_maps',
+    mapbox:      'apex_rk_mapbox',
+    openai:      'apex_rk_openai',
+    openrouter:  'apex_rk_openrouter',
+    groq:        'apex_rk_groq',
+    deepseek:    'apex_rk_deepseek',
+    mistral:     'apex_rk_mistral',
+    anthropic:   'apex_rk_anthropic',
+    gemini:      'apex_rk_gemini',
+    ollama_url:  'apex_rk_ollama_url',
+  }
+  const injectedKeys = []
+  Object.entries(LS_KEYS).forEach(([k, lsKey]) => {
+    if (apiKeys[k]) {
+      try { localStorage.setItem(lsKey, apiKeys[k]); injectedKeys.push(k) } catch {}
+    }
+  })
+
+  // ── Store pairing record for driver app to read ───────────────
+  writeJSON('apex:sync_pairing', {
+    code:        codes[idx].code,
+    driver_id:   codes[idx].driver_id,
+    driver_name: codes[idx].driver_name,
+    vehicle_reg: codes[idx].vehicle_reg,
+    paired_at:   tsNow(),
+    api_keys:    injectedKeys,   // list of key names injected (not values)
+    fleet_url:   typeof window !== 'undefined' ? window.location.origin : '',
+  })
+
   // Register as active driver
   const drivers = readJSON(ACTIVE_DRIVERS_KEY, {})
   drivers[codes[idx].driver_id] = {
@@ -105,8 +167,8 @@ export function activateSyncCode(code, driverProfile) {
     last_seen: tsNow(),
   }
   writeJSON(ACTIVE_DRIVERS_KEY, drivers)
-  getChannel()?.postMessage({ type: 'DRIVER_PAIRED', record: codes[idx] })
-  return { ok: true, record: codes[idx] }
+  getChannel()?.postMessage({ type: 'DRIVER_PAIRED', record: codes[idx], injectedKeys })
+  return { ok: true, record: codes[idx], injectedKeys }
 }
 
 // ─── LOCATION / TELEMETRY PUSH (Driver → Fleet) ───────────────
@@ -308,6 +370,21 @@ export function subscribeToDriverEvents(callback) {
   }
   ch.addEventListener('message', handler)
   return () => ch.removeEventListener('message', handler)
+}
+
+
+/**
+ * Driver app: read the stored sync pairing record (set after activateSyncCode)
+ */
+export function getDriverSyncPairing() {
+  return readJSON('apex:sync_pairing', null)
+}
+
+/**
+ * Driver app: clear sync pairing (unpair from fleet)
+ */
+export function clearDriverSyncPairing() {
+  try { localStorage.removeItem('apex:sync_pairing') } catch {}
 }
 
 // ─── QR & SHARE UTILITIES ─────────────────────────────────────

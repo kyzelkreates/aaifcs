@@ -1,3 +1,4 @@
+import React from 'react'
 /**
  * ============================================================
  * APEX AI — Set Driver Up With App
@@ -26,19 +27,62 @@ import {
   listenForDriverMessages,
   sendFleetReply,
   getDriverMessageHistory,
-  generatePairingCode,
-  getActivePairingCodes,
-  revokePairingCode,
   listenForDriverAIReports,
   getDriverAIReportHistory,
   listenForPairingEvents,
   sendViaWiFiDirect,
   sendViaNFC,
-  getPairingCodeQR,
-  copyPairingCode,
-  sendPairingCodeEmail,
-  sendPairingCodeWhatsApp,
 } from './services_sync_driverSyncService'
+import {
+  generateSyncCode,
+  getActiveSyncCodes,
+  revokeSyncCode,
+  getSyncCodeQR,
+  copySyncCode,
+  shareSyncCodeWhatsApp,
+  shareSyncCodeEmail,
+  shareSyncCodeNative,
+  subscribeToDriverEvents,
+} from './services_sync_liveSync'
+
+
+// ─── API Keys Badge ───────────────────────────────────────────
+// Shows which API keys will be forwarded to the driver app on pairing
+function ApiKeysBadge() {
+  const [keys, setKeys] = React.useState([])
+  React.useEffect(() => {
+    const LS_KEYS = {
+      graphhopper: { label: 'GraphHopper', icon: 'Map' },
+      google_maps: { label: 'Google Maps', icon: 'Map' },
+      openai:      { label: 'OpenAI', icon: 'Brain' },
+      openrouter:  { label: 'OpenRouter', icon: 'Network' },
+      groq:        { label: 'Groq', icon: 'Zap' },
+      deepseek:    { label: 'DeepSeek', icon: 'Brain' },
+      mistral:     { label: 'Mistral', icon: 'Brain' },
+      anthropic:   { label: 'Anthropic', icon: 'Brain' },
+      gemini:      { label: 'Gemini', icon: 'Brain' },
+    }
+    const found = Object.entries(LS_KEYS)
+      .filter(([k]) => localStorage.getItem(`apex_rk_${k}`))
+      .map(([, v]) => v.label)
+    setKeys(found)
+  }, [])
+
+  if (keys.length === 0) return (
+    <div className="mt-2 text-2xs text-amber-600 flex items-center gap-1">
+      <span>⚠</span> No API keys configured — driver app will use OSM/OSRM only
+    </div>
+  )
+  return (
+    <div className="mt-2 flex flex-wrap gap-1 justify-center">
+      <span className="text-2xs text-emerald-600">✓ Forwarding {keys.length} API key{keys.length > 1 ? 's' : ''} to driver app:</span>
+      {keys.map(k => (
+        <span key={k} className="text-2xs text-emerald-400 bg-emerald-500/8 border border-emerald-500/15 px-1.5 rounded font-mono">{k}</span>
+      ))}
+    </div>
+  )
+}
+
 
 // ─── Section wrapper ──────────────────────────────────────────
 function Panel({ title, icon, badge, children, className = '' }) {
@@ -112,7 +156,7 @@ function ActiveCodeRow({ code, onRevoke }) {
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
           <span className="text-xs font-mono font-bold text-violet-200 truncate">{code.code}</span>
-          {code.paired && <span className="text-2xs text-emerald-400 bg-emerald-500/10 px-1.5 rounded">Paired</span>}
+          {code.status === 'active' && <span className="text-2xs text-emerald-400 bg-emerald-500/10 px-1.5 rounded">Paired</span>}
         </div>
         <div className="text-2xs text-slate-600 mt-0.5">
           {code.driver_name || 'Guest'} ·{' '}
@@ -192,7 +236,7 @@ export default function DriverSetup() {
   const [pairingDriverReg,  setPairingDriverReg]  = useState('')
   const [pairingDriverAppURL, setPairingDriverAppURL] = useState('')
   const [codeExpiry,       setCodeExpiry]       = useState(null)
-  const [activeCodes,      setActiveCodes]      = useState(() => getActivePairingCodes())
+  const [activeCodes,      setActiveCodes]      = useState(() => getActiveSyncCodes())
   const [copiedCode,       setCopiedCode]       = useState(false)
   const [shareStatus,      setShareStatus]      = useState({})   // { method: 'ok'|'fail'|'busy' }
   const [nfcStatus,        setNfcStatus]        = useState(null)
@@ -210,7 +254,7 @@ export default function DriverSetup() {
     const u2 = listenForDriverMessages(m => setMessages(prev => [m, ...prev].slice(0, 200)))
     const u3 = listenForDriverAIReports(r => setAiReports(prev => [r, ...prev].slice(0, 200)))
     const u4 = listenForPairingEvents(evt => {
-      if (evt.type === 'paired') setActiveCodes(getActivePairingCodes())
+      if (evt.type === 'paired') setActiveCodes(getActiveSyncCodes())
     })
     return () => { u1(); u2(); u3(); u4() }
   }, [])
@@ -224,15 +268,15 @@ export default function DriverSetup() {
     const name     = driver?.full_name || 'Guest Driver'
     const reg      = driver?.vehicle_reg || driver?.license_plate || '—'
     const appURL   = `${window.location.origin}/#/driver-app`
-    const code     = generatePairingCode(driverId, name, reg, 60)
-    const qr       = getPairingCodeQR(code, 240)
+    const code     = generateSyncCode(driverId, name, reg, 60)
+    const qr       = getSyncCodeQR(code, 240)
     setPairingCode(code)
     setPairingDriverName(name)
     setPairingDriverReg(reg)
     setPairingDriverAppURL(appURL)
     setPairingQR(qr)
     setCodeExpiry(new Date(Date.now() + 60 * 60 * 1000))
-    setActiveCodes(getActivePairingCodes())
+    setActiveCodes(getActiveSyncCodes())
     setShareStatus({})
     setNfcStatus(null)
     setCopiedCode(false)
@@ -243,26 +287,26 @@ export default function DriverSetup() {
     setShareStatus(prev => ({ ...prev, [method]: state }))
 
   const handleCopy = async () => {
-    await copyPairingCode(pairingCode)
+    await copySyncCode(pairingCode)
     setCopiedCode(true)
     setTimeout(() => setCopiedCode(false), 2500)
   }
 
   const handleWhatsApp = () => {
-    sendPairingCodeWhatsApp(pairingCode, pairingDriverName, pairingDriverReg)
+    shareSyncCodeWhatsApp(pairingCode, pairingDriverName, pairingDriverReg)
     setMethodStatus('whatsapp', 'ok')
     setTimeout(() => setMethodStatus('whatsapp', null), 3000)
   }
 
   const handleEmail = () => {
-    sendPairingCodeEmail(pairingCode, pairingDriverName, pairingDriverReg)
+    shareSyncCodeEmail(pairingCode, pairingDriverName, pairingDriverReg)
     setMethodStatus('email', 'ok')
     setTimeout(() => setMethodStatus('email', null), 3000)
   }
 
   const handleWiFi = async () => {
     setMethodStatus('wifi', 'busy')
-    const res = await sendViaWiFiDirect(pairingCode, pairingDriverName, pairingDriverReg)
+    const res = await shareSyncCodeNative(pairingCode, pairingDriverName, pairingDriverReg)
     setMethodStatus('wifi', res.ok ? 'ok' : 'fail')
     setTimeout(() => setMethodStatus('wifi', null), 4000)
   }
@@ -276,8 +320,8 @@ export default function DriverSetup() {
   }
 
   const handleRevoke = (code) => {
-    revokePairingCode(code)
-    setActiveCodes(getActivePairingCodes())
+    revokeSyncCode(code)
+    setActiveCodes(getActiveSyncCodes())
     if (pairingCode === code) setPairingCode('')
   }
 
@@ -294,7 +338,7 @@ export default function DriverSetup() {
   const latestByVehicle = telemetry.reduce((a, t) => { if (!a[t.vehicle_id]) a[t.vehicle_id] = t; return a }, {})
   const unreadMsgs      = messages.filter(m => m.from === 'driver').length
   const displayMsgs     = [...messages].reverse()
-  const pairedCodes     = activeCodes.filter(c => c.paired)
+  const pairedCodes     = activeCodes.filter(c => c.status === 'active')
   const pendingCodes    = activeCodes.filter(c => !c.paired && new Date(c.expires_at) > new Date())
 
   const TABS = [
@@ -518,7 +562,7 @@ export default function DriverSetup() {
                     {[
                       { n: '1', text: 'Open the AP3X Driver App link on your phone' },
                       { n: '2', text: 'Tap "Enter Pairing Code" on the welcome screen' },
-                      { n: '3', text: `Enter the code: ${pairingCode}` },
+                      { n: '3', text: `Enter this code: ${pairingCode || 'APEX-XXXX-XXXX-XXXX-FC'}` },
                       { n: '4', text: 'Set a PIN and confirm your name — you\'re connected!' },
                     ].map(s => (
                       <div key={s.n} className="flex items-start gap-2.5">
@@ -545,18 +589,18 @@ export default function DriverSetup() {
           <div className="space-y-5">
 
             {/* QR Code */}
-            {pairingQR?.url && (
+            {pairingQR?.qrUrl && (
               <Panel title="QR Code — Scan to Open App + Enter Code" icon="QrCode">
                 <div className="flex flex-col items-center gap-4">
                   <div className="bg-white p-4 rounded-2xl shadow-[0_0_40px_rgba(167,139,250,0.15)]">
-                    <img src={pairingQR.url} alt="Driver pairing QR code" className="w-52 h-52 block" />
+                    <img src={pairingQR.qrUrl} alt="Driver pairing QR code" className="w-52 h-52 block" />
                   </div>
                   <p className="text-2xs text-slate-600 text-center leading-relaxed">
                     Driver scans QR → opens AP3X Driver App → code pre-filled automatically
                   </p>
                   <a
-                    href={pairingQR.url}
-                    download={`apex-driver-code-${pairingCode}.png`}
+                    href={pairingQR.qrUrl}
+                    download={`apex-sync-code-${pairingCode}.png`}
                     className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs text-cyan-300 bg-cyan-500/10 border border-cyan-500/20 hover:bg-cyan-500/20 transition-colors"
                   >
                     <Icon name="Download" size={13} /> Download QR
