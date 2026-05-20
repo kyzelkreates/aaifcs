@@ -171,7 +171,7 @@ export default function TopNav() {
           <Icon name="Cpu" size={12} className="text-violet-400" />
           <span className="text-xs text-violet-400 font-medium">AI Ready</span>
         </div>
-        <div className="hidden sm:flex">
+        <div className="flex">
           <LiveClock />
         </div>
         <button className="relative p-2 rounded-md text-slate-500 hover:text-slate-300 hover:bg-slate-800/60 transition-colors">

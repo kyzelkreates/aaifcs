@@ -17,7 +17,14 @@ import { fleetService, VEHICLE_STATUS } from './services_fleet_fleetService'
 import { driverService, DRIVER_STATUS } from './services_drivers_driverService'
 import { safetyService } from './services_safety_safetyService'
 import { telemetryService } from './services_realtime_telemetryService'
-import { listenForDriverTelemetry, listenForDriverMessages, sendFleetReply, getDriverMessageHistory, generatePairingCode, getActivePairingCodes, listenForDriverAIReports, getDriverAIReportHistory, listenForPairingEvents } from './services_sync_driverSyncService'
+import {
+  listenForDriverTelemetry, listenForDriverMessages, sendFleetReply,
+  getDriverMessageHistory, generatePairingCode, getActivePairingCodes,
+  revokePairingCode, listenForDriverAIReports, getDriverAIReportHistory,
+  listenForPairingEvents,
+  sendViaWiFiDirect, sendViaNFC, getPairingCodeQR,
+  copyPairingCode, sendPairingCodeEmail, sendPairingCodeWhatsApp,
+} from './services_sync_driverSyncService'
 import { ROUTES } from './config_routes'
 import { useAIChat } from './modules_ai_useAIChat'
 import { fleetLearning }   from './intel_fleetLearning'
@@ -253,10 +260,13 @@ function DriverAppPanel({ drivers, vehicles }) {
   const [codeExpiry,          setCodeExpiry]          = useState(null)
   const [activeCodes,         setActiveCodes]         = useState(() => getActivePairingCodes())
   const [codeGenDriver,       setCodeGenDriver]       = useState('')
-  const [pairingQR,           setPairingQR]           = useState('')
+  const [pairingQR,           setPairingQR]           = useState(null)  // { url, deepLink }
   const [pairingDriverName,   setPairingDriverName]   = useState('')
   const [pairingDriverReg,    setPairingDriverReg]    = useState('')
   const [pairingDriverAppURL, setPairingDriverAppURL] = useState('')
+  const [shareStatus,         setShareStatus]         = useState(null)   // null | { method, state: 'ok'|'fail'|'busy', msg }
+  const [nfcStatus,           setNfcStatus]           = useState(null)   // null | 'scanning' | 'written' | 'error'
+  const [copiedCode,          setCopiedCode]          = useState(false)
   const feedRef    = useRef(null)
   const chatEndRef = useRef(null)
   const { sendMessage: aiSend } = useAIChat('Sentinel')
@@ -310,38 +320,54 @@ function DriverAppPanel({ drivers, vehicles }) {
     const driver   = drivers?.find(d => d.id === codeGenDriver) || null
     const driverId = codeGenDriver || `guest-${Date.now()}`
     const name     = driver?.full_name || 'Driver'
-    const reg      = driver?.vehicle_reg || '—'
-    // Build the AP3X driver-app URL (never the fleet dashboard)
-    const driverAppURL = `${window.location.href.split('#')[0]}#/driver-app`
+    const reg      = driver?.vehicle_reg || driver?.license_plate || '—'
+    const driverAppURL = `${window.location.origin}/#/driver-app`
     const code = generatePairingCode(driverId, name, reg, 60)
+    const qr   = getPairingCodeQR(code, 220)
     setPairingCode(code)
     setPairingDriverName(name)
     setPairingDriverReg(reg)
     setPairingDriverAppURL(driverAppURL)
+    setPairingQR(qr)
     setCodeExpiry(new Date(Date.now() + 60 * 60 * 1000))
     setActiveCodes(getActivePairingCodes())
-    // Build QR — encodes the driver app URL so driver can scan to open the app
-    const qrData = encodeURIComponent(driverAppURL)
-    setPairingQR(`https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${qrData}&bgcolor=060b18&color=a78bfa&margin=4`)
+    setShareStatus(null)
+    setNfcStatus(null)
+    setCopiedCode(false)
   }
 
-  const copyCode = async () => {
-    try { await navigator.clipboard.writeText(pairingCode) } catch {}
+  // ── Share handlers ─────────────────────────────────────────
+  const handleCopy = async () => {
+    await copyPairingCode(pairingCode)
+    setCopiedCode(true)
+    setTimeout(() => setCopiedCode(false), 2500)
   }
 
-  const sharePairingWhatsApp = () => {
-    const text = encodeURIComponent(
-      `Hi ${pairingDriverName},\n\nYour AP3X Driver pairing code is: *${pairingCode}*\n\nSteps:\n1. Open the AP3X Driver app: ${pairingDriverAppURL}\n2. Enter code: ${pairingCode}\n\nCode expires in 60 mins. — Apex Fleet Ops`
-    )
-    window.open(`https://wa.me/?text=${text}`, '_blank')
+  const handleWhatsApp = () => {
+    sendPairingCodeWhatsApp(pairingCode, pairingDriverName, pairingDriverReg)
   }
 
-  const sharePairingEmail = () => {
-    const subj = encodeURIComponent(`[Apex AI] Your driver pairing code: ${pairingCode}`)
-    const body = encodeURIComponent(
-      `Hi ${pairingDriverName},\n\nYour AP3X Driver pairing code is: ${pairingCode}\n\nHow to get started:\n1. Open the AP3X Driver app:\n   ${pairingDriverAppURL}\n\n2. On the setup screen, enter your 6-digit code: ${pairingCode}\n\n3. Confirm your name and set a PIN.\n\nThis code is valid for 60 minutes.\n\n— Apex Fleet Operations`
-    )
-    window.open(`mailto:?subject=${subj}&body=${body}`, '_blank')
+  const handleEmail = () => {
+    sendPairingCodeEmail(pairingCode, pairingDriverName, pairingDriverReg)
+  }
+
+  const handleWiFiDirect = async () => {
+    setShareStatus({ method: 'wifi', state: 'busy', msg: 'Opening share sheet…' })
+    const res = await sendViaWiFiDirect(pairingCode, pairingDriverName, pairingDriverReg)
+    setShareStatus(res.ok
+      ? { method: 'wifi', state: 'ok',   msg: 'Shared via WiFi Direct / AirDrop / Nearby Share' }
+      : { method: 'wifi', state: 'fail', msg: res.error })
+    setTimeout(() => setShareStatus(null), 4000)
+  }
+
+  const handleNFC = async () => {
+    setNfcStatus('scanning')
+    setShareStatus({ method: 'nfc', state: 'busy', msg: 'Hold driver phone to NFC sensor on this device…' })
+    const res = await sendViaNFC(pairingCode, pairingDriverName, (st) => setNfcStatus(st))
+    setShareStatus(res.ok
+      ? { method: 'nfc', state: 'ok',   msg: 'Code written to NFC — driver phone received it!' }
+      : { method: 'nfc', state: 'fail', msg: res.error })
+    setTimeout(() => { setShareStatus(null); setNfcStatus(null) }, 5000)
   }
 
   // ── Send fleet reply ───────────────────────────────────────
@@ -404,7 +430,7 @@ function DriverAppPanel({ drivers, vehicles }) {
         </div>
       </div>
 
-      <div className="p-4 space-y-4">
+      <div className="p-3 sm:p-4 lg:p-6 space-y-4">
         {/* Tabs */}
         <div className="border-b border-slate-800/40">
           <div className="flex gap-0.5 overflow-x-auto scrollbar-none">
@@ -426,18 +452,19 @@ function DriverAppPanel({ drivers, vehicles }) {
         </div>
 
         {/* ── Pairing tab ─────────────────────────────────── */}
+        {/* ── Pairing tab ─────────────────────────────────── */}
         {tab === 'pairing' && (
           <div className="space-y-4">
             <div className="flex items-start gap-3 p-3 rounded-xl bg-amber-500/5 border border-amber-500/20">
               <Icon name="ShieldAlert" size={14} className="text-amber-400 flex-shrink-0 mt-0.5" />
               <div className="text-xs text-slate-400 leading-relaxed">
-                Generate a unique <span className="font-mono text-violet-300">APEX-…-DA</span> driver pairing code and share it with the driver. <span className="text-amber-300">Never share the fleet dashboard URL.</span> Drivers use their own separate AP3X Driver app — no access to fleet management.
+                Generate a unique <span className="font-mono text-violet-300 font-semibold">APEX-…-DA</span> driver pairing code. Share via QR, NFC, WhatsApp, email, or WiFi Direct.
+                <span className="text-amber-300 font-semibold"> Never share the fleet dashboard URL</span> — drivers use the separate AP3X Driver app only.
               </div>
             </div>
-
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
-                <label className="text-2xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">Assign To Driver</label>
+                <label className="text-2xs text-slate-500 font-semibold uppercase tracking-wider block mb-1.5">Assign to Driver</label>
                 <select value={codeGenDriver} onChange={e => setCodeGenDriver(e.target.value)}
                   className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-violet-500 focus:outline-none">
                   <option value="">— Guest / walk-in driver —</option>
@@ -451,68 +478,89 @@ function DriverAppPanel({ drivers, vehicles }) {
                 </button>
               </div>
             </div>
-
             {pairingCode && (
               <div className="flex flex-col items-center gap-4 p-5 bg-[#060b18] border border-violet-500/25 rounded-xl">
-                {/* Code */}
-                <div className="text-2xs text-slate-500 uppercase tracking-widest font-semibold">AP3X Driver Pairing Code</div>
-                {/* APEX-XXXXXXXX-XXXX-DA displayed in two rows for readability */}
-                <div className="w-full bg-slate-950/80 border border-violet-500/20 rounded-2xl px-4 py-4 text-center select-all">
-                  <div className="text-2xs text-slate-600 uppercase tracking-[0.25em] mb-2 font-semibold">Driver Pairing Code</div>
-                  <div className="font-mono font-bold text-violet-200 text-lg sm:text-xl tracking-[0.15em] leading-relaxed break-all">
-                    {pairingCode?.split('').join('​')}
+                <div className="w-full bg-slate-950 border border-violet-500/20 rounded-2xl px-4 py-4 text-center">
+                  <div className="text-2xs text-slate-600 uppercase tracking-[0.25em] font-semibold mb-2">Driver Pairing Code</div>
+                  <div className="font-mono font-bold text-violet-200 text-base sm:text-lg tracking-[0.12em] leading-relaxed break-all select-all">
+                    {pairingCode}
                   </div>
+                  {codeExpiry && (
+                    <div className="text-2xs text-slate-600 mt-2 font-mono">
+                      Valid 60 min · expires {codeExpiry.toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit' })}
+                    </div>
+                  )}
                 </div>
-                {codeExpiry && (
-                  <div className="text-2xs text-slate-500">Valid 60 min · expires {codeExpiry.toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit' })}</div>
-                )}
-
-                {/* QR code — scans to open driver app */}
-                {pairingQR && (
+                {pairingQR?.url && (
                   <div className="flex flex-col items-center gap-2">
-                    <div className="text-2xs text-slate-600 uppercase tracking-wider">Scan to open driver app</div>
-                    <img src={pairingQR} alt="Driver App QR" className="w-[160px] h-[160px] rounded-xl border border-violet-500/20" />
-                    <div className="text-2xs text-slate-700 text-center">Scan opens AP3X Driver app · then enter code above</div>
+                    <div className="text-2xs text-slate-600 uppercase tracking-wider font-semibold">Scan to open + auto-fill code</div>
+                    <img src={pairingQR.url} alt="Driver App QR" className="w-[180px] h-[180px] rounded-xl border border-violet-500/20" />
+                    <div className="text-2xs text-slate-700">Scan opens AP3X Driver app with code pre-filled</div>
                   </div>
                 )}
-
-                {/* Share buttons */}
-                <div className="w-full grid grid-cols-3 gap-2">
-                  <button onClick={copyCode}
-                    className="flex flex-col items-center gap-1.5 px-2 py-2.5 rounded-xl bg-slate-800/80 border border-slate-700 text-slate-400 hover:text-white hover:border-slate-500 text-xs transition-colors">
-                    <Icon name="Copy" size={14} />
-                    <span className="text-2xs">Copy Code</span>
+                {shareStatus && (
+                  <div className={`w-full flex items-center gap-2 px-3 py-2.5 rounded-xl border text-xs ${shareStatus.state === 'ok' ? 'bg-emerald-500/8 border-emerald-500/20 text-emerald-300' : shareStatus.state === 'fail' ? 'bg-red-500/8 border-red-500/20 text-red-300' : 'bg-violet-500/8 border-violet-500/20 text-violet-300'}`}>
+                    <Icon name={shareStatus.state === 'ok' ? 'CheckCircle2' : shareStatus.state === 'fail' ? 'AlertCircle' : 'Loader2'} size={13} className={shareStatus.state === 'busy' ? 'animate-spin' : ''} />
+                    {shareStatus.msg}
+                  </div>
+                )}
+                {nfcStatus === 'scanning' && (
+                  <div className="w-full flex flex-col items-center gap-2 py-3 px-4 rounded-xl bg-cyan-500/5 border border-cyan-500/20">
+                    <Icon name="Wifi" size={24} className="text-cyan-400 animate-pulse" />
+                    <div className="text-xs text-cyan-300 font-semibold">Hold driver's phone to NFC sensor</div>
+                    <div className="text-2xs text-slate-500">APEX-…-DA code will be written to their device</div>
+                  </div>
+                )}
+                <div className="w-full grid grid-cols-3 sm:grid-cols-5 gap-2">
+                  <button onClick={handleCopy} className={`flex flex-col items-center gap-1.5 px-2 py-3 rounded-xl border text-xs transition-colors ${copiedCode ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-slate-800/60 border-slate-700 text-slate-400 hover:text-white hover:border-slate-500'}`}>
+                    <Icon name={copiedCode ? 'CheckCircle2' : 'Copy'} size={15} />
+                    <span className="text-2xs">{copiedCode ? 'Copied!' : 'Copy'}</span>
                   </button>
-                  <button onClick={sharePairingWhatsApp}
-                    className="flex flex-col items-center gap-1.5 px-2 py-2.5 rounded-xl bg-[#25d366]/8 border border-[#25d366]/25 text-[#25d366] hover:bg-[#25d366]/15 text-xs transition-colors">
-                    <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/><path d="M12 2C6.48 2 2 6.48 2 12c0 1.85.5 3.58 1.37 5.07L2 22l5.07-1.35C8.46 21.51 10.2 22 12 22c5.52 0 10-4.48 10-10S17.52 2 12 2zm0 18c-1.69 0-3.27-.47-4.63-1.28l-.33-.2-3.01.8.82-2.96-.22-.35C3.47 14.76 3 13.44 3 12 3 7.03 7.03 3 12 3s9 4.03 9 9-4.03 9-9 9z"/></svg>
+                  <a href={pairingQR?.url} target="_blank" rel="noopener noreferrer"
+                    className="flex flex-col items-center gap-1.5 px-2 py-3 rounded-xl bg-violet-500/8 border border-violet-500/20 text-violet-400 hover:bg-violet-500/15 text-xs transition-colors no-underline">
+                    <Icon name="QrCode" size={15} />
+                    <span className="text-2xs">QR Code</span>
+                  </a>
+                  <button onClick={handleWhatsApp} className="flex flex-col items-center gap-1.5 px-2 py-3 rounded-xl bg-[#25d366]/8 border border-[#25d366]/25 text-[#25d366] hover:bg-[#25d366]/15 text-xs transition-colors">
+                    <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/><path d="M12 2C6.48 2 2 6.48 2 12c0 1.85.5 3.58 1.37 5.07L2 22l5.07-1.35C8.46 21.51 10.2 22 12 22c5.52 0 10-4.48 10-10S17.52 2 12 2zm0 18c-1.69 0-3.27-.47-4.63-1.28l-.33-.2-3.01.8.82-2.96-.22-.35C3.47 14.76 3 13.44 3 12 3 7.03 7.03 3 12 3s9 4.03 9 9-4.03 9-9 9z"/></svg>
                     <span className="text-2xs">WhatsApp</span>
                   </button>
-                  <button onClick={sharePairingEmail}
-                    className="flex flex-col items-center gap-1.5 px-2 py-2.5 rounded-xl bg-blue-500/8 border border-blue-500/25 text-blue-400 hover:bg-blue-500/15 text-xs transition-colors">
-                    <Icon name="Mail" size={14} />
+                  <button onClick={handleEmail} className="flex flex-col items-center gap-1.5 px-2 py-3 rounded-xl bg-blue-500/8 border border-blue-500/20 text-blue-400 hover:bg-blue-500/15 text-xs transition-colors">
+                    <Icon name="Mail" size={15} />
                     <span className="text-2xs">Email</span>
                   </button>
+                  <button onClick={handleWiFiDirect} disabled={shareStatus?.state === 'busy' && shareStatus?.method === 'wifi'}
+                    className="flex flex-col items-center gap-1.5 px-2 py-3 rounded-xl bg-cyan-500/8 border border-cyan-500/20 text-cyan-400 hover:bg-cyan-500/15 text-xs transition-colors disabled:opacity-40">
+                    <Icon name="Share2" size={15} />
+                    <span className="text-2xs">Share</span>
+                  </button>
                 </div>
-
-                <div className="text-2xs text-slate-700 text-center leading-relaxed">
-                  Driver opens AP3X Driver app → enters the full APEX-…-DA code → paired instantly
-                </div>
+                {'NDEFReader' in window && (
+                  <button onClick={handleNFC} disabled={nfcStatus === 'scanning'}
+                    className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl border text-xs font-semibold transition-colors ${nfcStatus === 'scanning' ? 'bg-cyan-500/10 border-cyan-500/30 text-cyan-400 animate-pulse' : 'bg-slate-800/60 border-slate-700 text-slate-400 hover:text-white hover:border-slate-500'}`}>
+                    <Icon name="Wifi" size={13} />
+                    {nfcStatus === 'scanning' ? 'Hold driver phone to NFC sensor…' : 'Send via NFC tap'}
+                  </button>
+                )}
+                <div className="text-2xs text-slate-700 text-center">Driver opens AP3X Driver app → enters APEX-…-DA code → paired instantly</div>
               </div>
             )}
-
             {activeCodes.length > 0 && (
               <div>
-                <div className="text-2xs text-slate-600 font-semibold uppercase tracking-wider mb-2">Active Codes</div>
+                <div className="text-2xs text-slate-600 font-semibold uppercase tracking-wider mb-2">Active Codes ({activeCodes.length})</div>
                 <div className="space-y-1.5">
                   {activeCodes.map(entry => (
                     <div key={entry.code} className="flex items-center gap-3 px-3 py-2 bg-slate-900/50 border border-slate-800/50 rounded-lg">
-                      <span className="font-mono text-sm font-bold text-violet-300 tracking-widest">{entry.code}</span>
                       <div className="flex-1 min-w-0">
-                        <div className="text-xs text-white truncate">{entry.driverName}</div>
-                        <div className="text-2xs text-slate-600 font-mono">{entry.vehicleReg}</div>
+                        <span className="font-mono text-xs font-bold text-violet-300 tracking-wider">{entry.code}</span>
+                        <div className="text-2xs text-slate-600 mt-0.5 truncate">
+                          {entry.driverName || 'Guest'} · {entry.vehicleReg || '—'} · expires {new Date(entry.expires).toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit' })}
+                        </div>
                       </div>
-                      <div className="text-2xs text-slate-600">exp. {new Date(entry.expires).toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit' })}</div>
+                      <button onClick={() => { revokePairingCode(entry.code); setActiveCodes(getActivePairingCodes()) }}
+                        className="text-slate-700 hover:text-red-400 transition-colors flex-shrink-0" title="Revoke">
+                        <Icon name="X" size={12} />
+                      </button>
                     </div>
                   ))}
                 </div>
@@ -521,195 +569,86 @@ function DriverAppPanel({ drivers, vehicles }) {
           </div>
         )}
 
-        {/* Telemetry tab */}
-        {tab === 'telemetry' && (
+        {/* ── AI Intelligence tab ─────────────────────────── */}
+        {tab === 'ai_reports' && (
           <div className="space-y-3">
-            {telemetryFeed.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-8 gap-2 border border-dashed border-slate-800 rounded-xl">
-                <Icon name="Radio" size={22} className="text-slate-800" />
-                <span className="text-2xs text-slate-700 text-center">Waiting for driver telemetry…<br/>Driver opens AP3X app → enables GPS → data appears here</span>
+            {aiReports.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-10 gap-3 border border-dashed border-slate-800 rounded-xl">
+                <Icon name="BrainCircuit" size={28} className="text-slate-800" />
+                <div className="text-center">
+                  <div className="text-xs text-slate-600 font-semibold">No driver AI reports yet</div>
+                  <div className="text-2xs text-slate-700 mt-1">Sentinel fatigue · RouteMind performance · safety events stream here in real time</div>
+                </div>
               </div>
             ) : (
               <>
-                {/* Live vehicle tiles */}
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  {Object.values(latestByVehicle).slice(0, 8).map(t => {
-                    const veh = vehicles.find(v => v.id === t.vehicle_id)
-                    const drv = drivers.find(d => d.id === t.driver_id)
+                {(() => {
+                  const latest = aiReports.slice(0, 20)
+                  const fSet = latest.filter(r => r.fatigueScore != null)
+                  const sSet = latest.filter(r => r.safetyScore  != null)
+                  const avgF = fSet.length ? Math.round(fSet.reduce((s,r) => s + r.fatigueScore, 0) / fSet.length) : null
+                  const avgS = sSet.length ? Math.round(sSet.reduce((s,r) => s + r.safetyScore,  0) / sSet.length) : null
+                  const crit = latest.filter(r => r.alertLevel === 'danger').length
+                  const drv  = [...new Set(latest.map(r => r.driverId).filter(Boolean))].length
+                  return (
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      {[
+                        { label: 'Avg Fatigue',     value: avgF != null ? `${avgF}%`  : '—', color: avgF > 70 ? 'text-red-400' : avgF > 40 ? 'text-amber-400' : 'text-emerald-400' },
+                        { label: 'Avg Safety',      value: avgS != null ? `${avgS}%`  : '—', color: avgS < 60 ? 'text-red-400' : avgS < 80 ? 'text-amber-400' : 'text-emerald-400' },
+                        { label: 'Critical Alerts', value: crit,  color: crit > 0 ? 'text-red-400' : 'text-slate-400' },
+                        { label: 'Active Drivers',  value: drv,   color: 'text-cyan-400' },
+                      ].map(k => (
+                        <div key={k.label} className="bg-slate-900/60 border border-slate-800/60 rounded-xl p-3 text-center">
+                          <div className={`text-lg font-bold font-mono ${k.color}`}>{k.value}</div>
+                          <div className="text-2xs text-slate-600 mt-0.5 leading-tight">{k.label}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )
+                })()}
+                <div className="space-y-2 max-h-[340px] overflow-y-auto scrollbar-none pr-1">
+                  {aiReports.map((r, i) => {
+                    const isSentinel = r.module === 'sentinel'
+                    const isHarsh    = r.module === 'harsh_event'
+                    const modColor   = isSentinel ? 'text-violet-400' : isHarsh ? 'text-red-400' : 'text-cyan-400'
+                    const modBg      = isSentinel ? 'bg-violet-500/5 border-violet-500/15' : isHarsh ? 'bg-red-500/5 border-red-500/15' : 'bg-cyan-500/5 border-cyan-500/15'
+                    const modIcon    = isSentinel ? 'Shield' : isHarsh ? 'AlertOctagon' : 'Navigation2'
+                    const modLabel   = isSentinel ? 'Sentinel AI' : isHarsh ? 'Harsh Event' : r.module === 'performance' ? 'Performance' : 'RouteMind AI'
                     return (
-                      <div key={t.vehicle_id} className="bg-slate-900/60 border border-slate-800 rounded-xl p-3">
-                        <div className="flex items-center justify-between mb-2">
-                          <span className="text-2xs text-slate-500 font-mono font-semibold">{veh?.reg_number || 'Vehicle'}</span>
-                          {t.lat && <span className="text-2xs text-emerald-400">●GPS</span>}
+                      <div key={r.id || i} className={`p-3 rounded-xl border ${modBg}`}>
+                        <div className="flex items-center gap-2 mb-2">
+                          <Icon name={modIcon} size={11} className={modColor} />
+                          <span className={`text-2xs font-bold uppercase tracking-wider ${modColor}`}>{modLabel}</span>
+                          {r.alertLevel === 'danger' && <span className="text-2xs px-1.5 py-0.5 rounded bg-red-500/15 border border-red-500/25 text-red-400 font-bold">CRITICAL</span>}
+                          {r.alertLevel === 'warn'   && <span className="text-2xs px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/20 text-amber-400 font-semibold">WARN</span>}
+                          <span className="text-2xs text-slate-600 font-mono ml-auto">{new Date(r.ts).toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit' })}</span>
                         </div>
-                        {drv && <div className="text-2xs text-slate-600 truncate mb-2">{drv.full_name}</div>}
-                        <div className="grid grid-cols-2 gap-1">
-                          {t.speed != null && (
-                            <div className="text-center">
-                              <div className={`font-mono font-bold text-sm ${t.speed > 80 ? 'text-red-400' : 'text-cyan-400'}`}>{t.speed}</div>
-                              <div className="text-2xs text-slate-700">km/h</div>
-                            </div>
-                          )}
-                          {t.fuel != null && (
-                            <div className="text-center">
-                              <div className={`font-mono font-bold text-sm ${t.fuel < 15 ? 'text-red-400' : t.fuel < 30 ? 'text-amber-400' : 'text-violet-400'}`}>{t.fuel}</div>
-                              <div className="text-2xs text-slate-700">% fuel</div>
-                            </div>
-                          )}
+                        <div className="flex items-center gap-2 mb-2 flex-wrap">
+                          {r.driverName && <span className="text-2xs text-white font-semibold flex items-center gap-1"><Icon name="User" size={9} className="text-slate-600" />{r.driverName}</span>}
+                          {r.vehicleReg && <span className="text-2xs text-slate-400 font-mono flex items-center gap-1"><Icon name="Truck" size={9} className="text-slate-600" />{r.vehicleReg}</span>}
                         </div>
-                        <div className="text-2xs text-slate-700 mt-2 font-mono">
-                          {new Date(t._received || Date.now()).toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                        <div className="flex flex-wrap gap-1.5 mb-2">
+                          {r.fatigueScore  != null && <span className={`text-2xs px-2 py-0.5 rounded-full border font-semibold ${r.fatigueScore > 70 ? 'bg-red-500/10 border-red-500/20 text-red-400' : r.fatigueScore > 40 ? 'bg-amber-500/10 border-amber-500/20 text-amber-400' : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'}`}>Fatigue {r.fatigueScore}%</span>}
+                          {r.safetyScore   != null && <span className="text-2xs px-2 py-0.5 rounded-full border bg-violet-500/10 border-violet-500/20 text-violet-300 font-semibold">Safety {r.safetyScore}%</span>}
+                          {r.speed         != null && <span className={`text-2xs px-2 py-0.5 rounded-full border font-mono ${r.speed > 100 ? 'bg-red-500/10 border-red-500/20 text-red-400' : 'bg-slate-800/60 border-slate-700 text-slate-400'}`}>{r.speed} km/h</span>}
+                          {r.sessionMinutes!= null && <span className="text-2xs px-2 py-0.5 rounded-full border bg-slate-800/60 border-slate-700 text-slate-500">{Math.floor(r.sessionMinutes/60)}h {r.sessionMinutes%60}m shift</span>}
+                          {r.fuelEfficiency!= null && <span className="text-2xs px-2 py-0.5 rounded-full border bg-cyan-500/10 border-cyan-500/20 text-cyan-400">{r.fuelEfficiency} L/100km</span>}
+                          {r.routeAdherence!= null && <span className="text-2xs px-2 py-0.5 rounded-full border bg-emerald-500/10 border-emerald-500/20 text-emerald-400">Route {r.routeAdherence}%</span>}
                         </div>
-                      </div>
-                    )
-                  })}
-                </div>
-                {/* Event log */}
-                <div ref={feedRef} className="space-y-1 max-h-[160px] overflow-y-auto scrollbar-none">
-                  {telemetryFeed.slice(0, 30).map((t, i) => {
-                    const veh = vehicles.find(v => v.id === t.vehicle_id)
-                    return (
-                      <div key={i} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-slate-900/40 border border-slate-800/40">
-                        <Icon name="Gauge" size={10} className="text-cyan-400/60 flex-shrink-0" />
-                        <span className="text-2xs text-slate-500 font-mono flex-1 truncate">
-                          {veh?.reg_number || 'Veh'} — {t.speed != null ? `${t.speed}km/h` : ''} {t.fuel != null ? `· ${t.fuel}% fuel` : ''} {t.lat ? `· ${parseFloat(t.lat).toFixed(3)},${parseFloat(t.lng || 0).toFixed(3)}` : ''}
-                        </span>
-                        <span className="text-2xs text-slate-700 font-mono flex-shrink-0">
-                          {new Date(t._received || Date.now()).toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                        </span>
+                        {r.summary   && <div className="text-xs text-slate-300 leading-relaxed">{r.summary}</div>}
+                        {r.question  && <div className="text-2xs text-slate-500 italic mt-1">Driver query: “{r.question}”</div>}
+                        {r.destination && <div className="text-2xs text-slate-600 mt-1 flex items-center gap-1"><Icon name="MapPin" size={9} />→ {r.destination}</div>}
                       </div>
                     )
                   })}
                 </div>
                 <div className="flex justify-end">
-                  <button onClick={() => setTelemetryFeed([])} className="text-2xs text-slate-700 hover:text-slate-500 flex items-center gap-1 transition-colors">
-                    <Icon name="Trash2" size={10} /> Clear feed
+                  <button onClick={() => { try { localStorage.removeItem('apex:db:driver_ai_reports') } catch {} window.location.reload() }}
+                    className="text-2xs text-slate-700 hover:text-red-400 flex items-center gap-1 transition-colors">
+                    <Icon name="Trash2" size={10} /> Clear reports
                   </button>
                 </div>
               </>
-            )}
-          </div>
-        )}
-
-        {/* Chat tab */}
-        {tab === 'chat' && (
-          <div className="space-y-3">
-            {/* Message window */}
-            <div className="bg-[#060b18] border border-slate-800/60 rounded-xl p-3 h-[280px] overflow-y-auto flex flex-col gap-2 scrollbar-none">
-              {displayMsgs.length === 0 ? (
-                <div className="flex-1 flex flex-col items-center justify-center gap-2 text-slate-700">
-                  <Icon name="MessageSquare" size={24} className="opacity-20" />
-                  <span className="text-xs text-center">No messages yet.<br/>Driver messages from the AP3X app appear here.</span>
-                </div>
-              ) : (
-                displayMsgs.map((msg, i) => (
-                  <div key={msg.id || i} className={`flex ${msg.from === 'driver' ? 'justify-start' : 'justify-end'}`}>
-                    <div className={`max-w-[75%] flex flex-col gap-1 ${msg.from === 'driver' ? 'items-start' : 'items-end'}`}>
-                      {/* Sender label */}
-                      <div className="flex items-center gap-1 px-1">
-                        <Icon name={msg.from === 'driver' ? 'User' : msg.from === 'ai' ? 'Cpu' : 'Radio'} size={9}
-                          className={msg.from === 'driver' ? 'text-violet-400' : msg.from === 'ai' ? 'text-cyan-400' : 'text-emerald-400'} />
-                        <span className="text-2xs text-slate-600">
-                          {msg.from === 'driver' ? (msg.driver_name || 'Driver') : msg.from === 'ai' ? 'Apex AI' : 'Fleet Ops'}
-                        </span>
-                        <span className="text-2xs text-slate-700 font-mono ml-1">
-                          {new Date(msg.ts).toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit' })}
-                        </span>
-                      </div>
-                      {/* Bubble */}
-                      <div className={`px-3 py-2 rounded-xl text-xs leading-relaxed ${
-                        msg.from === 'driver'
-                          ? 'bg-violet-500/10 border border-violet-500/20 text-violet-100'
-                          : msg.from === 'ai'
-                          ? 'bg-cyan-500/10 border border-cyan-500/15 text-cyan-100'
-                          : 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-100'
-                      }`}>
-                        {msg.text}
-                      </div>
-                      {/* AI reply button — only on driver messages */}
-                      {msg.from === 'driver' && (
-                        <button onClick={() => handleAIReply(msg)} disabled={aiReplying}
-                          className="text-2xs text-slate-600 hover:text-cyan-400 flex items-center gap-1 px-1 transition-colors disabled:opacity-30">
-                          <Icon name="Cpu" size={9} /> {aiReplying ? 'AI thinking…' : 'AI reply'}
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ))
-              )}
-              <div ref={chatEndRef} />
-            </div>
-
-            {/* Reply input */}
-            <div className="flex gap-2">
-              <input
-                value={replyInput}
-                onChange={e => setReplyInput(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && !e.shiftKey && sendReply()}
-                placeholder="Reply to driver…"
-                className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-600 focus:border-emerald-500 focus:outline-none"
-              />
-              <button onClick={sendReply} disabled={!replyInput.trim()}
-                className="w-9 h-9 flex items-center justify-center bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-emerald-400 hover:bg-emerald-500/20 disabled:opacity-30 transition-colors">
-                <Icon name="Send" size={13} />
-              </button>
-            </div>
-            <div className="text-2xs text-slate-700">Fleet replies are sent directly to the driver's AP3X app in real time. Click <span className="text-cyan-500">AI reply</span> on any driver message to auto-generate a response.</div>
-          </div>
-        )}
-
-        {/* ── AI Reports tab ──────────────────────────────── */}
-        {tab === 'ai_reports' && (
-          <div className="space-y-2">
-            {aiReports.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-8 gap-2 border border-dashed border-slate-800 rounded-xl">
-                <Icon name="BrainCircuit" size={22} className="text-slate-800" />
-                <span className="text-2xs text-slate-700 text-center">No AI reports yet.<br/>Driver Sentinel + RouteMind results appear here automatically.</span>
-              </div>
-            ) : (
-              <div className="space-y-2 max-h-[380px] overflow-y-auto scrollbar-none pr-1">
-                {aiReports.map((r, i) => (
-                  <div key={r.id || i} className={`p-3 rounded-xl border ${
-                    r.module === 'sentinel'
-                      ? 'bg-violet-500/5 border-violet-500/20'
-                      : 'bg-cyan-500/5 border-cyan-500/20'
-                  }`}>
-                    <div className="flex items-center gap-2 mb-1.5">
-                      <Icon name={r.module === 'sentinel' ? 'Shield' : 'Navigation2'} size={11}
-                        className={r.module === 'sentinel' ? 'text-violet-400' : 'text-cyan-400'} />
-                      <span className={`text-2xs font-bold uppercase tracking-wider ${r.module === 'sentinel' ? 'text-violet-400' : 'text-cyan-400'}`}>
-                        {r.module === 'sentinel' ? 'Sentinel' : 'RouteMind'}
-                      </span>
-                      <span className="text-2xs text-slate-600 font-mono ml-auto">
-                        {new Date(r.ts).toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit' })}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2 mb-1.5 flex-wrap">
-                      <span className="text-2xs text-white font-semibold">{r.driverName}</span>
-                      <span className="text-2xs text-slate-600 font-mono">{r.vehicleReg}</span>
-                      {r.fatigueScore != null && (
-                        <span className={`text-2xs px-1.5 py-0.5 rounded border font-semibold ${
-                          r.alertLevel === 'danger' ? 'border-red-500/30 text-red-400 bg-red-500/8' :
-                          r.alertLevel === 'warn'   ? 'border-amber-500/30 text-amber-400 bg-amber-500/8' :
-                          'border-emerald-500/30 text-emerald-400 bg-emerald-500/8'
-                        }`}>
-                          Fatigue {r.fatigueScore}%
-                        </span>
-                      )}
-                      {r.speed != null && (
-                        <span className="text-2xs text-slate-600">{r.speed} km/h</span>
-                      )}
-                      {r.destination && (
-                        <span className="text-2xs text-slate-600 truncate max-w-[120px]">→ {r.destination}</span>
-                      )}
-                    </div>
-                    {r.question && (
-                      <div className="text-2xs text-slate-500 italic mb-1">"{r.question}"</div>
-                    )}
-                    <div className="text-xs text-slate-300 leading-relaxed">{r.summary}</div>
-                  </div>
-                ))}
-              </div>
             )}
           </div>
         )}
@@ -813,7 +752,7 @@ export default function Dashboard() {
         </div>
       </div>
 
-      <div className="flex-1 p-6 space-y-5">
+      <div className="flex-1 p-3 sm:p-6 space-y-4 sm:space-y-5">
         {/* KPI Row */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
           <KpiCard label="Active Vehicles" value={activeVehicles}  sub={`of ${vehicles.length} total`}  icon="Truck"       color="text-cyan-400"    bg="bg-cyan-500/5"    border="border-cyan-500/10"   onClick={() => navigate(ROUTES.FLEET)} />

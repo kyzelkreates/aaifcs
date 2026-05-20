@@ -109,14 +109,8 @@ export const NAV_ITEMS = [
     icon:  'Map',
     group: 'navigation'
   },
-  {
-    id:        'ap3x',
-    label:     'AP3X Driver',
-    route:     ROUTES.AP3X,
-    icon:      'Navigation',
-    group:     'navigation',
-    highlight: true
-  },
+  // AP3X is a standalone driver-facing app — not a fleet ops nav item
+  // Accessed at /#/driver-app or /#/ap3x (public, no auth required)
   {
     id:        'ai',
     label:     'AI Command',

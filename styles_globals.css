@@ -192,3 +192,56 @@
     background-size: 40px 40px;
   }
 }
+
+/* ─── Mobile / PWA Responsive Utilities ─────────────────────── */
+
+/* Prevent overscroll bounce on iOS */
+html, body {
+  overscroll-behavior: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Ensure text never overflows on small screens */
+.truncate-mobile {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+/* Safe area insets for notched phones */
+.safe-bottom { padding-bottom: env(safe-area-inset-bottom, 0px); }
+.safe-top    { padding-top:    env(safe-area-inset-top,    0px); }
+
+/* 2xs text utility */
+.text-2xs {
+  font-size: 0.65rem;
+  line-height: 1rem;
+}
+
+/* Prevent horizontal scroll on mobile */
+main, .page-content {
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+
+/* Touch targets — minimum 44px on mobile */
+@media (max-width: 640px) {
+  button, [role="button"] {
+    min-height: 36px;
+  }
+  /* Compact font sizes */
+  .font-mono.text-5xl  { font-size: 2rem; }
+  .font-mono.text-4xl  { font-size: 1.75rem; }
+  .font-mono.text-3xl  { font-size: 1.5rem; }
+}
+
+/* Scrollbar hide utility */
+.scrollbar-none::-webkit-scrollbar { display: none; }
+.scrollbar-none { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* AP3X Driver App — full-screen layout */
+#driver-app-root {
+  height: 100dvh;
+  overflow: hidden;
+}

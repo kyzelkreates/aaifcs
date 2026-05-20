@@ -440,7 +440,16 @@ function useHarshEventDetector({ vehicleId, driverId, driverName, vehicleReg, on
 // ══════════════════════════════════════════════════════════════
 function SetupScreen({ onReady }) {
   const [step,     setStep]    = useState('code') // 'code' | 'profile'
-  const [code,     setCode]    = useState('')
+  // Auto-fill code from deep-link ?code= param (QR or NFC tap)
+  const [code,     setCode]    = useState(() => {
+    try {
+      const hash   = window.location.hash || ''
+      const search = hash.includes('?') ? hash.split('?')[1] : window.location.search
+      const params = new URLSearchParams(search)
+      const c      = params.get('code')
+      return c ? decodeURIComponent(c).toUpperCase() : ''
+    } catch { return '' }
+  })
   const [paired,   setPaired]  = useState(null)
   const [name,     setName]    = useState('')
   const [pin,      setPin]     = useState('')
@@ -476,7 +485,7 @@ function SetupScreen({ onReady }) {
   }
 
   return (
-    <div className="min-h-screen bg-[#060b18] flex items-center justify-center p-6">
+    <div className="min-h-[100dvh] bg-[#060b18] flex items-center justify-center p-6">
       <div className="w-full max-w-sm space-y-6">
         <div className="text-center space-y-2">
           <div className="w-16 h-16 mx-auto rounded-2xl bg-violet-500/10 border border-violet-500/30 flex items-center justify-center">

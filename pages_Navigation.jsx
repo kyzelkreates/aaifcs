@@ -59,7 +59,7 @@ function VehiclePanel({ vehicle, onClose, onFocus }) {
           </button>
         </div>
 
-        <div className="grid grid-cols-3 gap-3 mb-3">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
           <TelemetryValue label="Speed"  value={vehicle.speed ?? '—'} unit="km/h" size="sm"
             status={vehicle.speed > 90 ? 'warning' : 'nominal'} />
           <TelemetryValue label="Fuel"   value={vehicle.fuel  ?? '—'} unit="%"    size="sm"

@@ -317,7 +317,7 @@ function JobCard({ job, onAssign, onCancel, onComplete, onSync }) {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-2 text-xs text-slate-500 mb-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-slate-500 mb-3">
         <div className="flex items-center gap-1.5">
           <Icon name="User" size={11} className="text-slate-600" />
           {job.driver_name || 'Unassigned'}
@@ -425,7 +425,7 @@ function AssignModal({ job, drivers, vehicles, onClose, onSaved }) {
                     {allClear ? 'CLEARED' : 'ACTION REQUIRED'}
                   </span>
                 </div>
-                <div className="grid grid-cols-3 gap-2">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                   <div className="text-center">
                     <div className={`text-sm font-bold font-mono ${compliance.score >= 80 ? 'text-emerald-400' : compliance.score >= 50 ? 'text-amber-400' : 'text-red-400'}`}>{compliance.score}</div>
                     <div className="text-2xs text-slate-600">Compliance</div>
@@ -646,7 +646,7 @@ function JobModal({ onClose, onSaved, vehicles, drivers }) {
         <div className="flex-1 overflow-y-auto p-6 space-y-5">
 
           {/* Job basics */}
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="col-span-2 space-y-1.5">
               <label className="text-xs text-slate-400 font-medium">Job Title <span className="text-red-400">*</span></label>
               <input className="apex-input w-full" value={form.title}
@@ -680,7 +680,7 @@ function JobModal({ onClose, onSaved, vehicles, drivers }) {
           </div>
 
           {/* Assign */}
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <label className="text-xs text-slate-400 font-medium">Assign Driver</label>
               <select className="apex-input w-full" value={form.driver_id} onChange={e => set('driver_id', e.target.value)}>
@@ -824,7 +824,7 @@ function JobModal({ onClose, onSaved, vehicles, drivers }) {
                         {stop.geocoded.label?.split(',').slice(0,3).join(', ')}
                       </div>
                     )}
-                    <div className="grid grid-cols-2 gap-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       <input className="apex-input text-xs" value={stop.name}
                         onChange={e => updateStop(stop.id, 'name', e.target.value)}
                         placeholder="Location name (optional)" />

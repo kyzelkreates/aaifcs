@@ -158,7 +158,7 @@ export default function Safety() {
               {t.label}
             </button>
           ))}
-          <div className="flex-1" />
+          <div className="flex-1 overflow-auto p-3 sm:p-6" />
           <label className="flex items-center gap-2 text-xs text-slate-500 cursor-pointer">
             <input type="checkbox" checked={showResolved} onChange={e => setShowResolved(e.target.checked)}
               className="w-3.5 h-3.5 rounded" />
@@ -170,7 +170,7 @@ export default function Safety() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto p-6">
+      <div className="flex-1 overflow-auto p-3 sm:p-6">
         {loading && filtered.length === 0 ? (
           <div className="flex items-center justify-center h-48">
             <div className="w-8 h-8 border-2 border-cyan-500/20 border-t-cyan-400 rounded-full animate-spin" />

@@ -78,7 +78,7 @@ export default function AIPage() {
       <div className="flex-1 overflow-hidden flex">
 
         {/* Left — module cards + quick actions (hidden on small screens) */}
-        <div className="w-72 flex-shrink-0 border-r border-slate-800/60 overflow-auto p-4 space-y-3 hidden lg:block">
+        <div className="hidden md:flex w-64 lg:w-72 flex-shrink-0 border-r border-slate-800/60 overflow-auto p-4 space-y-3 flex-col hidden lg:block">
           <div className="text-2xs text-slate-600 uppercase tracking-widest font-semibold mb-3">AI Modules</div>
 
           {MODULE_CARDS.map(mod => (

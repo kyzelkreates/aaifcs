@@ -85,7 +85,7 @@ function ComplianceModal({ record, onClose, onSaved }) {
           <button onClick={onClose} className="btn-ghost p-1.5"><Icon name="X" size={16} /></button>
         </div>
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {[
               { k: 'name',        l: 'Record Name',  req: true },
               { k: 'entity_name', l: 'Entity (Driver/Vehicle)', req: false },
@@ -159,7 +159,7 @@ export default function Compliance() {
         </div>
 
         {/* Stats */}
-        <div className="grid grid-cols-4 gap-3 mb-4">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
           {[
             { label: 'Total',    value: records.length, color: 'text-white' },
             { label: 'Passing',  value: passing,        color: 'text-emerald-400' },
@@ -197,7 +197,7 @@ export default function Compliance() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 overflow-auto p-3 sm:p-0">
         <table className="w-full text-sm">
           <thead className="sticky top-0 bg-[#090e1c] z-10">
             <tr className="border-b border-slate-800/60">

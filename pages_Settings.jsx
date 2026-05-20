@@ -960,13 +960,13 @@ export default function Settings() {
   }
 
   return (
-    <div className="flex h-full">
+    <div className="flex flex-col sm:flex-row h-full min-h-0">
       {/* Sidebar */}
-      <div className="w-52 flex-shrink-0 border-r border-slate-800/60 py-4">
+      <div className="w-full sm:w-48 lg:w-52 flex-shrink-0 sm:border-r border-b sm:border-b-0 border-slate-800/60 py-2 sm:py-4 overflow-x-auto sm:overflow-y-auto">
         <div className="px-4 mb-4">
           <h1 className="font-display text-sm font-bold text-white">Settings</h1>
         </div>
-        <nav className="space-y-0.5 px-2">
+        <nav className="flex sm:flex-col gap-0.5 sm:gap-0 px-2 overflow-x-auto sm:overflow-visible scrollbar-none">
           {TABS.map(t => (
             <button key={t.key} onClick={() => setActiveTab(t.key)}
               className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-all ${
@@ -982,7 +982,7 @@ export default function Settings() {
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-auto p-8">
+      <div className="flex-1 overflow-auto p-4 sm:p-6 lg:p-8">
         <div className="max-w-2xl">
           {panels[activeTab]}
         </div>

@@ -473,3 +473,211 @@ export function getDriverAIReportHistory(limit = 100) {
     return all.slice(0, limit)
   } catch { return [] }
 }
+
+// ══════════════════════════════════════════════════════════════
+//  ENHANCED PAIRING CODE TRANSFER METHODS
+//  All methods transfer the APEX-XXXXXXXX-XXXX-DA code to driver
+//  No fleet dashboard URL is ever included in these transfers
+// ══════════════════════════════════════════════════════════════
+
+/**
+ * Build a standardised pairing payload for all transfer methods.
+ * Contains only the code + driver app URL — never fleet dashboard.
+ */
+function buildCodePayload(code, driverName, vehicleReg) {
+  const driverAppURL = `${window.location.origin}/#/driver-app`
+  return {
+    code,
+    driverAppURL,
+    driverName: driverName || 'Driver',
+    vehicleReg: vehicleReg || '',
+    expiresIn: '60 minutes',
+    instructions: `Open AP3X Driver app and enter code: ${code}`,
+  }
+}
+
+/**
+ * WiFi Direct / AirDrop / Nearby Share via Web Share API.
+ * Shares the pairing code as text — no URL to fleet dashboard.
+ * On Android: triggers Nearby Share. On iOS: triggers AirDrop.
+ */
+export async function sendViaWiFiDirect(code, driverName, vehicleReg) {
+  if (!navigator.share) {
+    return { ok: false, error: 'Web Share API not supported on this browser. Use Chrome on Android or Safari on iOS.' }
+  }
+  const payload = buildCodePayload(code, driverName, vehicleReg)
+  try {
+    await navigator.share({
+      title: `AP3X Driver Pairing Code — ${driverName || 'Driver'}`,
+      text:  `Your Apex driver pairing code: ${code}
+
+Open AP3X Driver app: ${payload.driverAppURL}
+Enter this code on the setup screen.
+Expires in 60 minutes.`,
+    })
+    return { ok: true }
+  } catch (e) {
+    if (e.name === 'AbortError') return { ok: false, error: 'Share cancelled.' }
+    return { ok: false, error: e.message }
+  }
+}
+
+/**
+ * NFC transfer — writes the pairing code to an NFC tag or peer device.
+ * Uses Web NFC API (NDEFReader) — Chrome on Android only.
+ * Writes a plain text record containing the APEX-…-DA code.
+ *
+ * Returns a cleanup function to abort the write if UI closes.
+ */
+export async function sendViaNFC(code, driverName, onStatus) {
+  if (!('NDEFReader' in window)) {
+    return { ok: false, error: 'NFC not supported. Use Chrome on Android with NFC enabled.' }
+  }
+  try {
+    onStatus?.('scanning')
+    const ndef = new window.NDEFReader()
+    // Request write permission + hold for tap
+    await ndef.write({
+      records: [
+        {
+          recordType: 'text',
+          data: code,
+          lang: 'en',
+        },
+        {
+          recordType: 'url',
+          data: `${window.location.origin}/#/driver-app?code=${encodeURIComponent(code)}`,
+        },
+      ],
+    })
+    onStatus?.('written')
+    return { ok: true }
+  } catch (e) {
+    onStatus?.('error')
+    if (e.name === 'AbortError')  return { ok: false, error: 'NFC write cancelled.' }
+    if (e.name === 'NotAllowedError') return { ok: false, error: 'NFC permission denied. Allow NFC in browser settings.' }
+    return { ok: false, error: `NFC error: ${e.message}` }
+  }
+}
+
+/**
+ * Generate a QR code image URL for the pairing code.
+ * QR encodes the full deep-link so scanning opens driver app with code pre-filled.
+ * Uses api.qrserver.com (free, no API key, no signup).
+ */
+export function getPairingCodeQR(code, size = 240) {
+  // Deep link: opens driver app and pre-fills the code
+  const deepLink = `${window.location.origin}/#/driver-app?code=${encodeURIComponent(code)}`
+  const encoded  = encodeURIComponent(deepLink)
+  return {
+    url:      `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encoded}&bgcolor=060b18&color=a78bfa&margin=4`,
+    deepLink,
+    code,
+  }
+}
+
+/**
+ * Copy the pairing code to clipboard.
+ */
+export async function copyPairingCode(code) {
+  try {
+    await navigator.clipboard.writeText(code)
+    return { ok: true }
+  } catch {
+    // Fallback for older browsers
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = code
+      ta.style.position = 'fixed'; ta.style.opacity = '0'
+      document.body.appendChild(ta); ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+      return { ok: true }
+    } catch {
+      return { ok: false, error: 'Clipboard write failed. Copy the code manually.' }
+    }
+  }
+}
+
+/**
+ * Send pairing code via email (mailto: link).
+ * No fleet dashboard URL in the email — only driver app URL + code.
+ */
+export function sendPairingCodeEmail(code, driverName, vehicleReg, email = '') {
+  const payload = buildCodePayload(code, driverName, vehicleReg)
+  const subject = encodeURIComponent(`[Apex Fleet] Your AP3X driver pairing code`)
+  const body    = encodeURIComponent(
+    `Hi ${driverName || 'Driver'},
+
+` +
+    `Your AP3X Driver pairing code is:
+
+` +
+    `  ${code}
+
+` +
+    `How to get started:
+` +
+    `  1. Open the AP3X Driver app on your device:
+` +
+    `     ${payload.driverAppURL}
+
+` +
+    `  2. On the setup screen, enter your pairing code exactly as shown above.
+
+` +
+    `  3. Set your name and PIN — you are ready to drive.
+
+` +
+    (vehicleReg ? `Assigned vehicle: ${vehicleReg}
+
+` : '') +
+    `This code expires in 60 minutes.
+
+` +
+    `— Apex Fleet Operations`
+  )
+  window.open(`mailto:${email}?subject=${subject}&body=${body}`, '_blank')
+  return { ok: true }
+}
+
+/**
+ * Send pairing code via WhatsApp.
+ * Opens wa.me link with pre-filled message containing the code.
+ */
+export function sendPairingCodeWhatsApp(code, driverName, vehicleReg, phone = '') {
+  const payload = buildCodePayload(code, driverName, vehicleReg)
+  const text    = encodeURIComponent(
+    `Hi ${driverName || 'Driver'} 👋
+
+` +
+    `Your *AP3X Driver pairing code* is:
+
+` +
+    `*${code}*
+
+` +
+    `Steps:
+` +
+    `1️⃣ Open the AP3X Driver app:
+${payload.driverAppURL}
+
+` +
+    `2️⃣ Enter your code on the setup screen
+
+` +
+    `3️⃣ Set your PIN and start driving!
+
+` +
+    (vehicleReg ? `🚛 Your vehicle: *${vehicleReg}*
+
+` : '') +
+    `⏱ Code expires in 60 minutes.
+— Apex Fleet Ops`
+  )
+  const url = phone
+    ? `https://wa.me/${phone.replace(/\D/g, '')}?text=${text}`
+    : `https://wa.me/?text=${text}`
+  window.open(url, '_blank', 'noopener,noreferrer')
+  return { ok: true }
+}

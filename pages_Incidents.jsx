@@ -92,7 +92,7 @@ function IncidentModal({ initial, onClose, onSaved }) {
               className="apex-input" placeholder="Brief description of the incident" />
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <label className="text-xs text-slate-400 font-medium">Type</label>
               <select value={form.type} onChange={e => set('type', e.target.value)} className="apex-input">
@@ -301,7 +301,7 @@ export default function Incidents() {
       </div>
 
       {/* List */}
-      <div className="flex-1 overflow-auto p-6">
+      <div className="flex-1 overflow-auto p-3 sm:p-6">
         {loading ? (
           <div className="flex items-center justify-center py-20 text-slate-600 gap-2">
             <Icon name="Loader2" size={18} className="animate-spin" />

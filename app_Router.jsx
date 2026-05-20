@@ -59,6 +59,7 @@ export const router = createHashRouter([
   { path: '/auth/reset-confirm', element: <ResetConfirm /> },
   { path: '/driver-import',       element: <DriverImport /> },
   { path: '/driver-app',          element: <DriverApp /> },
+  { path: '/ap3x',               element: <AP3X /> },
 
   // ── Protected App Shell ────────────────────────────────────
   {
@@ -85,7 +86,7 @@ export const router = createHashRouter([
 
       // Navigation
       { path: 'navigation',             element: <Navigation /> },
-      { path: 'ap3x',                   element: <AP3X /> },
+      // AP3X is a public standalone driver app — not in protected fleet shell
 
       // Intelligence
       { path: 'ai',                     element: <AIPage /> },

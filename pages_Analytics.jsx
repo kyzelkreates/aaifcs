@@ -342,7 +342,7 @@ function OverviewTab({ timeSeries, period, vehicles, drivers, aiReports, alerts 
                     <Tooltip content={<ApexTooltip />} />
                   </PieChart>
                 </ResponsiveContainer>
-                <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 mt-2">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1.5 mt-2">
                   {fleetPie.map(e => (
                     <div key={e.name} className="flex items-center gap-1.5 text-2xs">
                       <div className="w-2 h-2 rounded-full" style={{ background: PIE_COLORS[e.name] || C.slate }} />
@@ -1078,7 +1078,7 @@ export default function Analytics() {
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-auto p-6">
+      <div className="flex-1 overflow-auto p-3 sm:p-6">
         {loading
           ? <div className="flex items-center justify-center h-40 text-slate-600 gap-3">
               <Icon name="Loader2" size={20} className="animate-spin" />

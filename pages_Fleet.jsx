@@ -156,7 +156,7 @@ export default function Fleet() {
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-auto p-6">
+      <div className="flex-1 overflow-auto p-3 sm:p-6">
         {isLoading && filtered.length === 0 ? (
           <div className="flex items-center justify-center h-48">
             <div className="w-8 h-8 border-2 border-cyan-500/20 border-t-cyan-400 rounded-full animate-spin" />

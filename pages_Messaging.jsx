@@ -279,7 +279,7 @@ export default function Messaging() {
         </div>
 
         {/* List */}
-        <div className="flex-1 overflow-y-auto scrollbar-none">
+        <div className="flex-1 overflow-y-auto scrollbar-none p-3 sm:p-0">
           {filteredChannels.map(ch => (
             <ChannelItem key={ch.id} channel={ch} active={activeChannel?.id === ch.id}
               onClick={() => setActiveChannel(ch)} />
