@@ -12,6 +12,7 @@ import { useAIChat } from './modules_ai_useAIChat'
 import { useAIStore } from './core_storage'
 import { AI_MODULES } from './services_ai_aiConfig'
 import { aiFallbackSystem } from './services_ai_aiFallbackSystem'
+import { getRuntimeKey, RUNTIME_KEYS } from './services_maps_runtimeKeys'
 
 // ─── Module definitions ───────────────────────────────────────
 const MODULES = [
@@ -156,7 +157,7 @@ function StarterChip({ text, onClick }) {
 // ─── AI Command Panel ─────────────────────────────────────────
 export default function AICommandPanel({ defaultModule = null, compact = false }) {
   const [activeModIdx, setActiveModIdx] = useState(
-    defaultModule ? MODULES.findIndex(m => m.id === defaultModule) || 0 : 0
+    defaultModule ? Math.max(0, MODULES.findIndex(m => m.id === defaultModule)) : 0
   )
   const activeMod = MODULES[activeModIdx] || MODULES[0]
 
@@ -279,6 +280,19 @@ export default function AICommandPanel({ defaultModule = null, compact = false }
             </button>
           </div>
         )}
+          {!hasAnyKey && (
+            <div className="mx-4 mb-3 flex items-start gap-2.5 p-3 rounded-xl bg-amber-500/8 border border-amber-500/20">
+              <Icon name="AlertTriangle" size={14} className="text-amber-400 mt-0.5 flex-shrink-0" />
+              <div>
+                <p className="text-xs font-semibold text-amber-300">No AI Provider Configured</p>
+                <p className="text-2xs text-amber-400/70 mt-1">
+                  Add an API key in <strong className="text-amber-300">Settings → AI Providers</strong> to activate AI Intelligence.
+                  Supported: OpenAI, Groq (free tier), OpenRouter, DeepSeek, Mistral, Claude, Gemini.
+                </p>
+              </div>
+            </div>
+          )}
+
         <div className={`flex items-end gap-2 bg-slate-900/60 border rounded-2xl px-4 py-2 transition-all ${
           streaming ? 'border-cyan-500/20' : 'border-slate-800/60 focus-within:border-slate-700/60'
         }`}>

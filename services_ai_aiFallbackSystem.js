@@ -10,6 +10,8 @@
  */
 
 import { DEFAULT_AI_CONFIG, AI_PROVIDERS } from './services_ai_aiConfig.js'
+import { getRuntimeKey, RUNTIME_KEYS } from './services_maps_runtimeKeys.js'
+
 
 const FAILURE_THRESHOLD = 3
 const RECOVERY_WINDOW   = 5 * 60 * 1000  // 5 minutes
@@ -83,15 +85,15 @@ class AIFallbackSystem {
    * Returns which providers have their API keys set.
    */
   _detectAvailable() {
-    const env = import.meta.env
+    // getRuntimeKey checks localStorage first, then VITE_ env vars
     const keyMap = {
-      [AI_PROVIDERS.OPENAI]:     env.VITE_OPENAI_API_KEY,
-      [AI_PROVIDERS.OPENROUTER]: env.VITE_OPENROUTER_API_KEY,
-      [AI_PROVIDERS.GROQ]:       env.VITE_GROQ_API_KEY,
-      [AI_PROVIDERS.DEEPSEEK]:   env.VITE_DEEPSEEK_API_KEY,
-      [AI_PROVIDERS.MISTRAL]:    env.VITE_MISTRAL_API_KEY,
-      [AI_PROVIDERS.CLAUDE]:     env.VITE_CLAUDE_API_KEY,
-      [AI_PROVIDERS.GEMINI]:     env.VITE_GEMINI_API_KEY,
+      [AI_PROVIDERS.OPENAI]:     getRuntimeKey(RUNTIME_KEYS.OPENAI),
+      [AI_PROVIDERS.OPENROUTER]: getRuntimeKey(RUNTIME_KEYS.OPENROUTER),
+      [AI_PROVIDERS.GROQ]:       getRuntimeKey(RUNTIME_KEYS.GROQ),
+      [AI_PROVIDERS.DEEPSEEK]:   getRuntimeKey(RUNTIME_KEYS.DEEPSEEK),
+      [AI_PROVIDERS.MISTRAL]:    getRuntimeKey(RUNTIME_KEYS.MISTRAL),
+      [AI_PROVIDERS.CLAUDE]:     getRuntimeKey(RUNTIME_KEYS.ANTHROPIC),
+      [AI_PROVIDERS.GEMINI]:     getRuntimeKey(RUNTIME_KEYS.GEMINI),
       [AI_PROVIDERS.OLLAMA]:     env.VITE_OLLAMA_BASE_URL || 'http://localhost:11434', // always try
     }
     return this._baseOrder.filter(id => !!keyMap[id])

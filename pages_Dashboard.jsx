@@ -1713,12 +1713,16 @@ export default function Dashboard() {
         <DriverSyncSection drivers={drivers} vehicles={vehicles} />
 
         {/* Quick actions */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
           {[
-            { label: 'New Dispatch Job', icon: 'Radio',       color: 'text-cyan-400',   route: ROUTES.DISPATCH  },
-            { label: 'Report Incident',  icon: 'FileText',    color: 'text-red-400',    route: ROUTES.INCIDENTS },
-            { label: 'Safety Alerts',    icon: 'ShieldAlert', color: 'text-amber-400',  route: ROUTES.SAFETY    },
-            { label: 'Open Analytics',   icon: 'BarChart3',   color: 'text-violet-400', route: ROUTES.ANALYTICS },
+            { label: 'New Dispatch Job',   icon: 'Radio',          color: 'text-cyan-400',    route: ROUTES.DISPATCH    },
+            { label: 'Report Incident',    icon: 'FileText',       color: 'text-red-400',     route: ROUTES.INCIDENTS   },
+            { label: 'Safety AI',          icon: 'ShieldAlert',    color: 'text-amber-400',   route: ROUTES.SAFETY      },
+            { label: 'Compliance AI',      icon: 'ClipboardCheck', color: 'text-emerald-400', route: ROUTES.COMPLIANCE  },
+            { label: 'AI Intelligence',    icon: 'Brain',          color: 'text-violet-400',  route: ROUTES.AI          },
+            { label: 'Live Fleet Map',     icon: 'Map',            color: 'text-cyan-400',    route: ROUTES.NAVIGATION  },
+            { label: 'Analytics',          icon: 'BarChart3',      color: 'text-violet-400',  route: ROUTES.ANALYTICS   },
+            { label: 'Fleet Control',      icon: 'Truck',          color: 'text-slate-400',   route: ROUTES.FLEET       },
           ].map(a => (
             <button key={a.label} onClick={() => navigate(a.route)}
               className="flex items-center gap-2.5 bg-[#0d1426] border border-slate-800/60 rounded-xl px-4 py-3.5 hover:border-slate-700/60 hover:bg-slate-800/20 transition-all text-left group">

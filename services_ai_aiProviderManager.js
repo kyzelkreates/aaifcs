@@ -10,6 +10,8 @@
 
 import { AI_PROVIDERS, DEFAULT_AI_CONFIG, PROVIDER_ENDPOINTS } from './services_ai_aiConfig.js'
 import { getDefaultModel, getModels } from './services_ai_aiModelRegistry.js'
+import { getRuntimeKey, RUNTIME_KEYS } from './services_maps_runtimeKeys.js'
+
 
 class AIProviderManager {
   constructor() {
@@ -48,16 +50,15 @@ class AIProviderManager {
    * Get active provider's API key from env.
    */
   getActiveApiKey() {
-    const env = import.meta.env
     const keyMap = {
-      [AI_PROVIDERS.OPENAI]:     env.VITE_OPENAI_API_KEY,
-      [AI_PROVIDERS.OPENROUTER]: env.VITE_OPENROUTER_API_KEY,
-      [AI_PROVIDERS.GROQ]:       env.VITE_GROQ_API_KEY,
-      [AI_PROVIDERS.DEEPSEEK]:   env.VITE_DEEPSEEK_API_KEY,
-      [AI_PROVIDERS.MISTRAL]:    env.VITE_MISTRAL_API_KEY,
-      [AI_PROVIDERS.CLAUDE]:     env.VITE_CLAUDE_API_KEY,
-      [AI_PROVIDERS.GEMINI]:     env.VITE_GEMINI_API_KEY,
-      [AI_PROVIDERS.OLLAMA]:     env.VITE_OLLAMA_BASE_URL || 'http://localhost:11434',
+      [AI_PROVIDERS.OPENAI]:     getRuntimeKey(RUNTIME_KEYS.OPENAI),
+      [AI_PROVIDERS.OPENROUTER]: getRuntimeKey(RUNTIME_KEYS.OPENROUTER),
+      [AI_PROVIDERS.GROQ]:       getRuntimeKey(RUNTIME_KEYS.GROQ),
+      [AI_PROVIDERS.DEEPSEEK]:   getRuntimeKey(RUNTIME_KEYS.DEEPSEEK),
+      [AI_PROVIDERS.MISTRAL]:    getRuntimeKey(RUNTIME_KEYS.MISTRAL),
+      [AI_PROVIDERS.CLAUDE]:     getRuntimeKey(RUNTIME_KEYS.ANTHROPIC),
+      [AI_PROVIDERS.GEMINI]:     getRuntimeKey(RUNTIME_KEYS.GEMINI),
+      [AI_PROVIDERS.OLLAMA]:     getRuntimeKey('ollama') || 'http://localhost:11434',
     }
     return keyMap[this._active] || null
   }
@@ -95,16 +96,15 @@ class AIProviderManager {
    * Check if a provider has its API key set.
    */
   isProviderAvailable(providerId) {
-    const env = import.meta.env
     const checks = {
-      [AI_PROVIDERS.OPENAI]:     !!env.VITE_OPENAI_API_KEY,
-      [AI_PROVIDERS.OPENROUTER]: !!env.VITE_OPENROUTER_API_KEY,
-      [AI_PROVIDERS.GROQ]:       !!env.VITE_GROQ_API_KEY,
-      [AI_PROVIDERS.DEEPSEEK]:   !!env.VITE_DEEPSEEK_API_KEY,
-      [AI_PROVIDERS.MISTRAL]:    !!env.VITE_MISTRAL_API_KEY,
-      [AI_PROVIDERS.CLAUDE]:     !!env.VITE_CLAUDE_API_KEY,
-      [AI_PROVIDERS.GEMINI]:     !!env.VITE_GEMINI_API_KEY,
-      [AI_PROVIDERS.OLLAMA]:     true,  // always available (local)
+      [AI_PROVIDERS.OPENAI]:     !!getRuntimeKey(RUNTIME_KEYS.OPENAI),
+      [AI_PROVIDERS.OPENROUTER]: !!getRuntimeKey(RUNTIME_KEYS.OPENROUTER),
+      [AI_PROVIDERS.GROQ]:       !!getRuntimeKey(RUNTIME_KEYS.GROQ),
+      [AI_PROVIDERS.DEEPSEEK]:   !!getRuntimeKey(RUNTIME_KEYS.DEEPSEEK),
+      [AI_PROVIDERS.MISTRAL]:    !!getRuntimeKey(RUNTIME_KEYS.MISTRAL),
+      [AI_PROVIDERS.CLAUDE]:     !!getRuntimeKey(RUNTIME_KEYS.ANTHROPIC),
+      [AI_PROVIDERS.GEMINI]:     !!getRuntimeKey(RUNTIME_KEYS.GEMINI),
+      [AI_PROVIDERS.OLLAMA]:     true,
     }
     return checks[providerId] ?? false
   }

@@ -4,13 +4,17 @@
  * ============================================================
  */
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import Icon from './components_ui_Icon'
 import Badge from './components_ui_Badge'
 import StatusDot from './components_ui_StatusDot'
 import TelemetryValue from './components_ui_TelemetryValue'
 import { safetyService, ALERT_SEVERITY, ALERT_TYPE, SEVERITY_COLORS } from './services_safety_safetyService'
 import { formatDateTime } from './utils_format'
+import { useAIChat }    from './modules_ai_useAIChat'
+import { AI_MODULES }   from './services_ai_aiConfig'
+import { getRuntimeKey, RUNTIME_KEYS } from './services_maps_runtimeKeys'
+
 
 const ALERT_ICONS = {
   speeding: 'Gauge', harsh_brake: 'AlertOctagon', harsh_acceleration: 'Zap',
@@ -80,6 +84,124 @@ function SafetyStatCard({ label, value, sub, icon, color }) {
       </div>
       <div className={`font-mono text-2xl font-bold ${color || 'text-white'}`}>{value}</div>
       {sub && <div className="text-xs text-slate-600 mt-1">{sub}</div>}
+    </div>
+  )
+}
+
+
+// ─── Apex Sentinel AI Chat Panel ─────────────────────────────
+function SentinelAIPanel() {
+  const { messages, streaming, error, sendMessage, clearMessages } = useAIChat(AI_MODULES.APEX_SENTINEL)
+  const [input, setInput] = useState('')
+  const [noKey, setNoKey]  = useState(false)
+  const chatEndRef = useRef(null)
+
+  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages.length])
+  useEffect(() => {
+    // Check if any key is available
+    const keys = [RUNTIME_KEYS.OPENAI, RUNTIME_KEYS.OPENROUTER, RUNTIME_KEYS.GROQ,
+                  RUNTIME_KEYS.DEEPSEEK, RUNTIME_KEYS.MISTRAL, RUNTIME_KEYS.ANTHROPIC, RUNTIME_KEYS.GEMINI]
+    setNoKey(!keys.some(k => !!getRuntimeKey(k)))
+  }, [])
+
+  const STARTERS = [
+    'Analyse current driver safety scores and identify the highest risk drivers',
+    'What are the most common harsh braking patterns this week?',
+    'Generate a fatigue risk assessment for drivers on long shifts today',
+    'Recommend safety training priorities based on recent incident data',
+    'Which routes have the highest accident risk and why?',
+  ]
+
+  const handleSend = () => {
+    if (!input.trim() || streaming) return
+    sendMessage(input.trim())
+    setInput('')
+  }
+
+  return (
+    <div className="bg-[#0d1426] border border-red-500/20 rounded-xl overflow-hidden flex flex-col" style={{ height: '440px' }}>
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800/60 flex-shrink-0">
+        <div className="flex items-center gap-2.5">
+          <div className="w-7 h-7 rounded-lg bg-red-500/10 border border-red-500/20 flex items-center justify-center">
+            <Icon name="ShieldAlert" size={14} className="text-red-400" />
+          </div>
+          <div>
+            <span className="text-sm font-semibold text-white">Apex Sentinel AI</span>
+            <p className="text-2xs text-slate-500">Safety intelligence · Driver risk analysis</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          {messages.length > 0 && (
+            <button onClick={clearMessages} className="text-2xs text-slate-600 hover:text-slate-400 transition-colors">Clear</button>
+          )}
+          <div className={`w-2 h-2 rounded-full ${streaming ? 'bg-red-400 animate-pulse' : 'bg-emerald-400'}`} />
+        </div>
+      </div>
+
+      {/* No key warning */}
+      {noKey && (
+        <div className="mx-3 mt-3 flex items-start gap-2 p-3 rounded-lg bg-amber-500/8 border border-amber-500/20 flex-shrink-0">
+          <Icon name="AlertTriangle" size={13} className="text-amber-400 mt-0.5 flex-shrink-0" />
+          <p className="text-2xs text-amber-300">
+            No AI provider key set. Go to <strong>Settings → AI Providers</strong> and add an API key to enable Sentinel AI.
+          </p>
+        </div>
+      )}
+
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto p-4 space-y-3 scrollbar-none">
+        {messages.length === 0 && (
+          <div className="space-y-2">
+            <p className="text-2xs text-slate-600 uppercase tracking-widest font-medium mb-3">Quick questions</p>
+            {STARTERS.map(s => (
+              <button key={s} onClick={() => sendMessage(s)}
+                className="w-full text-left px-3 py-2.5 rounded-lg bg-slate-800/30 border border-slate-700/30 hover:border-red-500/20 hover:bg-red-500/5 text-xs text-slate-400 hover:text-slate-200 transition-all">
+                {s}
+              </button>
+            ))}
+          </div>
+        )}
+        {messages.map(msg => (
+          <div key={msg.id} className={`flex gap-2.5 ${msg.role === 'user' ? 'flex-row-reverse' : 'flex-row'}`}>
+            <div className={`w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0 mt-0.5 ${
+              msg.role === 'user' ? 'bg-slate-700 border border-slate-600' : 'bg-red-500/10 border border-red-500/20'
+            }`}>
+              <Icon name={msg.role === 'user' ? 'User' : 'ShieldAlert'} size={12}
+                className={msg.role === 'user' ? 'text-slate-400' : 'text-red-400'} />
+            </div>
+            <div className={`flex-1 max-w-[88%] px-3 py-2.5 rounded-xl text-xs leading-relaxed ${
+              msg.role === 'user'
+                ? 'bg-slate-700/50 border border-slate-600/30 text-slate-200'
+                : msg.error
+                  ? 'bg-red-500/8 border border-red-500/15 text-red-300'
+                  : 'bg-[#060b18] border border-slate-800/60 text-slate-300'
+            }`} style={{ whiteSpace: 'pre-wrap' }}>
+              {msg.content || (msg.streaming ? <span className="text-slate-600 animate-pulse">Sentinel AI thinking…</span> : '')}
+            </div>
+          </div>
+        ))}
+        <div ref={chatEndRef} />
+      </div>
+
+      {/* Input */}
+      <div className="flex-shrink-0 p-3 border-t border-slate-800/60">
+        {error && <p className="text-2xs text-red-400 mb-2 px-1">{error}</p>}
+        <div className="flex gap-2">
+          <input
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
+            placeholder="Ask Apex Sentinel about driver safety, risks, incidents…"
+            className="flex-1 bg-slate-800/50 border border-slate-700/50 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-600 focus:border-red-500/40 focus:outline-none"
+            disabled={streaming}
+          />
+          <button onClick={handleSend} disabled={streaming || !input.trim()}
+            className="px-3 py-2 rounded-lg bg-red-500/15 border border-red-500/25 text-red-300 hover:bg-red-500/25 transition-all disabled:opacity-40 flex-shrink-0">
+            <Icon name={streaming ? 'Loader2' : 'Send'} size={14} className={streaming ? 'animate-spin' : ''} />
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -188,6 +310,8 @@ export default function Safety() {
           </div>
         )}
       </div>
+        <SentinelAIPanel />
+
     </div>
   )
 }

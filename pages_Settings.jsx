@@ -167,72 +167,215 @@ function AIPanel() {
     model: s.model, setModel: s.setModel
   }))
 
-  const envKeys = {
-    openai:      import.meta.env.VITE_OPENAI_API_KEY,
-    openrouter:  import.meta.env.VITE_OPENROUTER_API_KEY,
-    groq:        import.meta.env.VITE_GROQ_API_KEY,
-    deepseek:    import.meta.env.VITE_DEEPSEEK_API_KEY,
-    mistral:     import.meta.env.VITE_MISTRAL_API_KEY,
-    ollama:      import.meta.env.VITE_OLLAMA_BASE_URL,
-  }
-
   const PROVIDERS_LIST = [
-    { id: 'openai',     label: 'OpenAI',       models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo'] },
-    { id: 'openrouter', label: 'OpenRouter',   models: ['anthropic/claude-3.5-sonnet', 'google/gemini-pro', 'meta-llama/llama-3-70b'] },
-    { id: 'groq',       label: 'Groq',         models: ['llama-3.3-70b-versatile', 'mixtral-8x7b-32768'] },
-    { id: 'deepseek',   label: 'DeepSeek',     models: ['deepseek-chat', 'deepseek-reasoner'] },
-    { id: 'mistral',    label: 'Mistral AI',   models: ['mistral-large-latest', 'mistral-small-latest'] },
-    { id: 'ollama',     label: 'Ollama (Local)', models: ['llama3', 'mistral', 'phi3', 'gemma2'] },
+    { id: 'openai',     label: 'OpenAI',          rk: 'openai',     models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo'],                placeholder: 'sk-...' },
+    { id: 'openrouter', label: 'OpenRouter',       rk: 'openrouter', models: ['anthropic/claude-3.5-sonnet', 'google/gemini-pro', 'meta-llama/llama-3-70b'], placeholder: 'sk-or-...' },
+    { id: 'groq',       label: 'Groq',             rk: 'groq',       models: ['llama-3.3-70b-versatile', 'mixtral-8x7b-32768', 'gemma2-9b-it'],      placeholder: 'gsk_...' },
+    { id: 'deepseek',   label: 'DeepSeek',         rk: 'deepseek',   models: ['deepseek-chat', 'deepseek-reasoner'],                                   placeholder: 'sk-...' },
+    { id: 'mistral',    label: 'Mistral AI',       rk: 'mistral',    models: ['mistral-large-latest', 'mistral-small-latest', 'open-mixtral-8x22b'],   placeholder: 'your-mistral-key' },
+    { id: 'claude',     label: 'Anthropic Claude', rk: 'anthropic',  models: ['claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022'],              placeholder: 'sk-ant-...' },
+    { id: 'gemini',     label: 'Google Gemini',    rk: 'gemini',     models: ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash'],              placeholder: 'AIza...' },
+    { id: 'ollama',     label: 'Ollama (Local)',   rk: null,         models: ['llama3.2', 'llama3.1', 'mistral', 'phi3', 'gemma2', 'qwen2.5'],        placeholder: null },
   ]
 
+  // Runtime key state — reads from localStorage via getRuntimeKey
+  const [keys, setKeys] = useState(() => {
+    const init = {}
+    PROVIDERS_LIST.forEach(p => {
+      init[p.id] = p.rk ? (getRuntimeKey(p.rk) || '') : ''
+    })
+    return init
+  })
+  const [savedKey, setSavedKey] = useState(null)  // which provider just saved
+  const [showKey,  setShowKey]  = useState({})    // { providerId: bool }
+  const [testing,  setTesting]  = useState(null)
+  const [testRes,  setTestRes]  = useState({})
+
+  const handleKeyChange = (id, val) => {
+    setKeys(prev => ({ ...prev, [id]: val }))
+  }
+
+  const handleSaveKey = (p) => {
+    if (!p.rk) return
+    setRuntimeKey(p.rk, keys[p.id])
+    setSavedKey(p.id)
+    setTimeout(() => setSavedKey(null), 2000)
+  }
+
+  const handleTestKey = async (p) => {
+    if (!p.rk) return
+    const key = keys[p.id] || getRuntimeKey(p.rk)
+    if (!key) { setTestRes(prev => ({ ...prev, [p.id]: 'no_key' })); return }
+    setTesting(p.id)
+    try {
+      let ok = false
+      if (p.id === 'openai' || p.id === 'openrouter' || p.id === 'groq' || p.id === 'deepseek' || p.id === 'mistral') {
+        const endpoints = {
+          openai: 'https://api.openai.com/v1',
+          openrouter: 'https://openrouter.ai/api/v1',
+          groq: 'https://api.groq.com/openai/v1',
+          deepseek: 'https://api.deepseek.com/v1',
+          mistral: 'https://api.mistral.ai/v1',
+        }
+        const res = await fetch(`${endpoints[p.id]}/models`, {
+          headers: { 'Authorization': `Bearer ${key}` },
+          signal: AbortSignal.timeout(8000),
+        })
+        ok = res.ok
+      } else if (p.id === 'claude') {
+        // Anthropic doesn't have /models — do a minimal messages call
+        const res = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: 'claude-3-haiku-20240307', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+          signal: AbortSignal.timeout(8000),
+        })
+        ok = res.status !== 401 && res.status !== 403
+      } else if (p.id === 'gemini') {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${key}`, {
+          signal: AbortSignal.timeout(8000),
+        })
+        ok = res.ok
+      }
+      setTestRes(prev => ({ ...prev, [p.id]: ok ? 'ok' : 'fail' }))
+    } catch (e) {
+      setTestRes(prev => ({ ...prev, [p.id]: 'fail' }))
+    } finally {
+      setTesting(null)
+    }
+  }
+
   const currentModels = PROVIDERS_LIST.find(p => p.id === provider)?.models || []
+  const hasAnyKey = PROVIDERS_LIST.some(p => p.rk && !!getRuntimeKey(p.rk))
 
   return (
     <div className="space-y-0">
       <SectionHead label="AI Provider" />
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-6">
+
+      {/* No-key banner */}
+      {!hasAnyKey && (
+        <div className="mb-4 flex items-start gap-3 p-3 rounded-lg bg-amber-500/8 border border-amber-500/20">
+          <Icon name="AlertTriangle" size={15} className="text-amber-400 mt-0.5 flex-shrink-0" />
+          <div>
+            <p className="text-xs font-semibold text-amber-300">No AI Keys Configured</p>
+            <p className="text-2xs text-amber-400/70 mt-0.5">Enter at least one API key below to enable AI features. All keys are stored locally in your browser.</p>
+          </div>
+        </div>
+      )}
+
+      {/* Provider + key cards */}
+      <div className="space-y-3 mb-6">
         {PROVIDERS_LIST.map(p => {
-          const hasKey = !!envKeys[p.id]
-          const active = provider === p.id
+          const hasKey    = p.rk ? !!getRuntimeKey(p.rk) : true
+          const active    = provider === p.id
+          const tr        = testRes[p.id]
+          const keyVal    = keys[p.id] || ''
+          const keyVisible = showKey[p.id]
           return (
-            <button key={p.id} onClick={() => { setProvider(p.id); setModel(p.models[0]) }}
-              className={`p-3 rounded-xl border text-left transition-all ${
-                active
-                  ? 'bg-cyan-500/10 border-cyan-500/30 shadow-[0_0_20px_rgba(0,212,255,0.05)]'
-                  : 'bg-slate-900/40 border-slate-800/60 hover:border-slate-700/60'
-              }`}>
-              <div className="flex items-center justify-between mb-2">
-                <span className={`text-sm font-medium ${active ? 'text-cyan-400' : 'text-white'}`}>{p.label}</span>
-                {hasKey
-                  ? <Badge variant="cyan" size="sm"><Icon name="CheckCircle2" size={9} />Ready</Badge>
-                  : <Badge variant="muted" size="sm">No key</Badge>}
+            <div key={p.id} className={`rounded-xl border transition-all overflow-hidden ${
+              active
+                ? 'bg-cyan-500/5 border-cyan-500/25'
+                : 'bg-slate-900/40 border-slate-800/60 hover:border-slate-700/60'
+            }`}>
+              {/* Header row */}
+              <div className="flex items-center gap-3 p-3">
+                <button
+                  onClick={() => { setProvider(p.id); setModel(p.models[0]) }}
+                  className="flex-1 flex items-center gap-3 text-left"
+                >
+                  <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                    hasKey
+                      ? tr === 'ok'   ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.7)]'
+                        : tr === 'fail' ? 'bg-red-400'
+                        : 'bg-emerald-400/70'
+                      : 'bg-slate-600'
+                  }`} />
+                  <span className={`text-sm font-medium ${active ? 'text-cyan-400' : 'text-white'}`}>{p.label}</span>
+                  {active && <span className="text-2xs text-cyan-500 bg-cyan-500/10 px-1.5 py-0.5 rounded font-medium">Active</span>}
+                  {!hasKey && p.rk && <span className="text-2xs text-slate-600 ml-auto">No key</span>}
+                  {hasKey && tr === 'ok'   && <span className="text-2xs text-emerald-400 ml-auto">✓ Verified</span>}
+                  {hasKey && tr === 'fail' && <span className="text-2xs text-red-400 ml-auto">✗ Failed</span>}
+                  {hasKey && tr === 'no_key' && <span className="text-2xs text-amber-400 ml-auto">Enter key first</span>}
+                </button>
+                {p.rk && (
+                  <div className="flex items-center gap-1.5 flex-shrink-0">
+                    <button
+                      onClick={() => handleTestKey(p)}
+                      disabled={testing === p.id}
+                      className="px-2 py-1 rounded-md text-2xs text-slate-400 hover:text-slate-200 bg-slate-800/50 hover:bg-slate-700/50 border border-slate-700/40 transition-colors disabled:opacity-50"
+                    >
+                      {testing === p.id ? <Icon name="Loader2" size={10} className="animate-spin" /> : 'Test'}
+                    </button>
+                  </div>
+                )}
               </div>
-              {active && <div className="text-2xs text-slate-500">Active provider</div>}
-            </button>
+
+              {/* Key input */}
+              {p.rk && (
+                <div className="px-3 pb-3">
+                  <div className="flex gap-2">
+                    <div className="relative flex-1">
+                      <input
+                        type={keyVisible ? 'text' : 'password'}
+                        value={keyVal}
+                        onChange={e => handleKeyChange(p.id, e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter') handleSaveKey(p) }}
+                        placeholder={p.placeholder || 'Enter API key…'}
+                        autoComplete="off"
+                        className="w-full bg-slate-800/60 border border-slate-700/50 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-600 font-mono focus:border-cyan-500/50 focus:outline-none pr-8"
+                      />
+                      <button
+                        onClick={() => setShowKey(prev => ({ ...prev, [p.id]: !prev[p.id] }))}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-600 hover:text-slate-400 transition-colors"
+                      >
+                        <Icon name={keyVisible ? 'EyeOff' : 'Eye'} size={12} />
+                      </button>
+                    </div>
+                    <button
+                      onClick={() => handleSaveKey(p)}
+                      className={`px-3 py-2 rounded-lg text-xs font-semibold transition-all flex-shrink-0 ${
+                        savedKey === p.id
+                          ? 'bg-emerald-500/20 border border-emerald-500/30 text-emerald-300'
+                          : 'bg-cyan-500/15 border border-cyan-500/25 text-cyan-300 hover:bg-cyan-500/25'
+                      }`}
+                    >
+                      {savedKey === p.id ? '✓' : 'Save'}
+                    </button>
+                  </div>
+                  <p className="text-2xs text-slate-700 mt-1.5">Stored locally in your browser · never sent to Apex servers</p>
+                </div>
+              )}
+              {!p.rk && (
+                <p className="px-3 pb-3 text-2xs text-slate-600">No key needed — runs on your local machine</p>
+              )}
+            </div>
           )
         })}
       </div>
 
-      <SectionHead label="Model" />
-      <SettingRow label="Active Model" sub="Model used for all AI features">
+      <SectionHead label="Active Model" />
+      <SettingRow label="Model" sub="Used for all AI modules when no module-specific model is set">
         <select value={model || ''} onChange={e => setModel(e.target.value)} className="apex-input w-64 text-sm py-1.5">
           {currentModels.map(m => <option key={m} value={m}>{m}</option>)}
         </select>
       </SettingRow>
 
-      <SectionHead label="API Keys" />
-      <div className="bg-slate-900/40 border border-slate-800/60 rounded-lg p-4 space-y-1">
-        <p className="text-xs text-slate-500 mb-3">
-          API keys are loaded from environment variables. Set them in your <code className="text-cyan-400 font-mono">.env</code> file.
-        </p>
-        {Object.entries(envKeys).map(([key, val]) => (
-          <div key={key} className="flex items-center gap-2 text-xs">
-            <Icon name={val ? 'CheckCircle2' : 'Circle'} size={12}
-              className={val ? 'text-emerald-400' : 'text-slate-700'} />
-            <code className="text-slate-400 font-mono">VITE_{key.toUpperCase()}_API_KEY</code>
-            <span className={`ml-auto ${val ? 'text-emerald-400' : 'text-slate-700'}`}>
-              {val ? 'Set' : 'Not set'}
-            </span>
+      <SectionHead label="Key Quick-Reference" />
+      <div className="bg-slate-900/40 border border-slate-800/60 rounded-lg p-4 space-y-1.5">
+        <p className="text-2xs text-slate-600 mb-3">Where to get API keys:</p>
+        {[
+          ['OpenAI',     'platform.openai.com/api-keys'],
+          ['OpenRouter', 'openrouter.ai/keys'],
+          ['Groq',       'console.groq.com/keys'],
+          ['DeepSeek',   'platform.deepseek.com'],
+          ['Mistral',    'console.mistral.ai/api-keys'],
+          ['Anthropic',  'console.anthropic.com/settings/keys'],
+          ['Gemini',     'aistudio.google.com/app/apikey'],
+        ].map(([name, url]) => (
+          <div key={name} className="flex items-center justify-between text-2xs">
+            <span className="text-slate-500">{name}</span>
+            <a href={`https://${url}`} target="_blank" rel="noopener noreferrer"
+              className="text-cyan-500/70 hover:text-cyan-400 font-mono truncate max-w-[220px]">{url}</a>
           </div>
         ))}
       </div>

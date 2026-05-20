@@ -11,6 +11,8 @@
 
 import { aiProviderManager } from './services_ai_aiProviderManager.js'
 import { aiFallbackSystem }  from './services_ai_aiFallbackSystem.js'
+import { getRuntimeKey, RUNTIME_KEYS } from './services_maps_runtimeKeys.js'
+
 
 // ─── Adapters ─────────────────────────────────────────────────
 
@@ -187,49 +189,49 @@ export const aiRouter = {
 
     switch (providerId) {
       case 'openai': {
-        const key = env.VITE_OPENAI_API_KEY
-        if (!key) throw new Error('No OpenAI key')
+        const key = getRuntimeKey(RUNTIME_KEYS.OPENAI)
+        if (!key) throw new Error('OpenAI API key not set — add it in Settings → AI Providers')
         body.model = model || 'gpt-4o-mini'
         const data = await callOpenAI('https://api.openai.com/v1', key, body)
         return { content: data.choices[0].message.content, provider: 'openai', model: body.model, usage: data.usage }
       }
       case 'openrouter': {
-        const key = env.VITE_OPENROUTER_API_KEY
-        if (!key) throw new Error('No OpenRouter key')
+        const key = getRuntimeKey(RUNTIME_KEYS.OPENROUTER)
+        if (!key) throw new Error('OpenRouter API key not set — add it in Settings → AI Providers')
         body.model = model || 'anthropic/claude-3.5-haiku'
         const data = await callOpenAI('https://openrouter.ai/api/v1', key, body)
         return { content: data.choices[0].message.content, provider: 'openrouter', model: body.model, usage: data.usage }
       }
       case 'groq': {
-        const key = env.VITE_GROQ_API_KEY
-        if (!key) throw new Error('No Groq key')
+        const key = getRuntimeKey(RUNTIME_KEYS.GROQ)
+        if (!key) throw new Error('Groq API key not set — add it in Settings → AI Providers')
         body.model = model || 'llama-3.3-70b-versatile'
         const data = await callOpenAI('https://api.groq.com/openai/v1', key, body)
         return { content: data.choices[0].message.content, provider: 'groq', model: body.model, usage: data.usage }
       }
       case 'deepseek': {
-        const key = env.VITE_DEEPSEEK_API_KEY
-        if (!key) throw new Error('No DeepSeek key')
+        const key = getRuntimeKey(RUNTIME_KEYS.DEEPSEEK)
+        if (!key) throw new Error('DeepSeek API key not set — add it in Settings → AI Providers')
         body.model = model || 'deepseek-chat'
         const data = await callOpenAI('https://api.deepseek.com/v1', key, body)
         return { content: data.choices[0].message.content, provider: 'deepseek', model: body.model, usage: data.usage }
       }
       case 'mistral': {
-        const key = env.VITE_MISTRAL_API_KEY
-        if (!key) throw new Error('No Mistral key')
+        const key = getRuntimeKey(RUNTIME_KEYS.MISTRAL)
+        if (!key) throw new Error('Mistral API key not set — add it in Settings → AI Providers')
         body.model = model || 'mistral-small-latest'
         const data = await callOpenAI('https://api.mistral.ai/v1', key, body)
         return { content: data.choices[0].message.content, provider: 'mistral', model: body.model, usage: data.usage }
       }
       case 'claude': {
-        const key = env.VITE_CLAUDE_API_KEY
-        if (!key) throw new Error('No Claude key')
+        const key = getRuntimeKey(RUNTIME_KEYS.ANTHROPIC)
+        if (!key) throw new Error('Anthropic/Claude API key not set — add it in Settings → AI Providers')
         const data = await callClaude(key, { ...body, model: model || 'claude-3-5-haiku-20241022' })
         return { content: data.choices[0].message.content, provider: 'claude', model: model || 'claude-3-5-haiku-20241022', usage: data.usage }
       }
       case 'gemini': {
-        const key = env.VITE_GEMINI_API_KEY
-        if (!key) throw new Error('No Gemini key')
+        const key = getRuntimeKey(RUNTIME_KEYS.GEMINI)
+        if (!key) throw new Error('Gemini API key not set — add it in Settings → AI Providers')
         const data = await callGemini(key, { ...body, model: model || 'gemini-1.5-flash' })
         return { content: data.choices[0].message.content, provider: 'gemini', model: model || 'gemini-1.5-flash' }
       }
@@ -251,7 +253,7 @@ export const aiRouter = {
 
     switch (providerId) {
       case 'openai': {
-        const key = env.VITE_OPENAI_API_KEY
+        const key = getRuntimeKey(RUNTIME_KEYS.OPENAI)
         if (!key) throw new Error('No OpenAI key')
         body.model = model || 'gpt-4o-mini'
         return callOpenAIStream('https://api.openai.com/v1', key, body, onChunk)
