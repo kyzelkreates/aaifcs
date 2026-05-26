@@ -857,7 +857,7 @@ function SecurityPanel({ user }) {
 
 function IntegrationsPanel() {
   const integrations = [
-    { name: 'Supabase',     icon: 'Database',   status: !!import.meta.env.VITE_SUPABASE_URL, desc: 'Database & realtime' },
+    { name: 'Supabase',     icon: 'Database',   status: (() => { try { const s = JSON.parse(localStorage.getItem('apex:supabase:settings') || '{}'); return !!(s.enabled && s.url && s.anonKey); } catch { return !!import.meta.env.VITE_SUPABASE_URL; } })(), desc: 'Database & realtime' },
     { name: 'GraphHopper',  icon: 'Route',       status: !!import.meta.env.VITE_GRAPHHOPPER_API_KEY, desc: 'Primary routing' },
     { name: 'Google Maps',  icon: 'Map',         status: !!import.meta.env.VITE_GOOGLE_MAPS_API_KEY, desc: 'Secondary mapping' },
     { name: 'Mapbox',       icon: 'Globe',       status: !!import.meta.env.VITE_MAPBOX_TOKEN, desc: 'Tile provider' },
@@ -1338,10 +1338,18 @@ function BackendPanel() {
   const [saveMsg,    setSaveMsg]    = useState(null)
   const [showKey,    setShowKey]    = useState(false)
 
-  // Live status updates from backend service
+  // Subscribe to live status events from backendService
   useEffect(() => {
     const unsub = onConnectionStatus((s) => setConnStatus(s))
     return unsub
+  }, [])
+
+  // Auto-probe on mount if settings are already saved and enabled
+  useEffect(() => {
+    const s = getSupabaseSettings()
+    if (s.enabled && s.url && s.anonKey) {
+      probeConnection()
+    }
   }, [])
 
   const STATUS_CFG = {
@@ -1355,28 +1363,42 @@ function BackendPanel() {
   const sc = STATUS_CFG[connStatus] || STATUS_CFG.offline
 
   const handleSave = () => {
-    const settings = { enabled, url: url.trim(), anonKey: anonKey.trim(), connectionStatus: connStatus }
-    saveSupabaseSettings(settings)
-    if (!enabled) destroySupabaseClient()
+    const trimUrl = url.trim()
+    const trimKey = anonKey.trim()
+    saveSupabaseSettings({ enabled, url: trimUrl, anonKey: trimKey, connectionStatus: connStatus })
+    if (enabled && trimUrl && trimKey) {
+      // Re-init client with new/saved config then probe
+      destroySupabaseClient()
+      setTimeout(() => probeConnection(), 200)
+    } else if (!enabled) {
+      destroySupabaseClient()
+      setConnStatus('offline')
+    }
     setSaveMsg('Saved')
     setTimeout(() => setSaveMsg(null), 2500)
   }
 
   const handleTest = async () => {
-    if (!url.trim() || !anonKey.trim()) {
+    const trimUrl = url.trim()
+    const trimKey = anonKey.trim()
+    if (!trimUrl || !trimKey) {
       setConnStatus('invalid_config')
       return
     }
     setTesting(true)
     setConnStatus('connecting')
-    const { ok, error } = await testSupabaseConnection(url.trim(), anonKey.trim())
+    const { ok, error } = await testSupabaseConnection(trimUrl, trimKey)
     if (ok) {
+      // Save with enabled=true so probeConnection can init client
+      saveSupabaseSettings({ enabled: true, url: trimUrl, anonKey: trimKey, connectionStatus: 'connected' })
+      setEnabled(true)
+      // Reinit singleton with saved credentials then probe for global status
+      destroySupabaseClient()
+      await probeConnection()
       setConnStatus('connected')
-      // Auto-save on successful test
-      saveSupabaseSettings({ enabled, url: url.trim(), anonKey: anonKey.trim(), connectionStatus: 'connected' })
     } else {
       setConnStatus('failed')
-      console.warn('[AP3X:Backend] Test failed:', error)
+      console.warn('[AP3X:Backend] Connection test failed:', error)
     }
     setTesting(false)
   }

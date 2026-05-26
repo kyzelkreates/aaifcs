@@ -3,13 +3,18 @@
  * AP3X — Global Connection Status Indicator
  * components/ui/ConnectionStatus.jsx
  *
- * Shows live backend connection state.
- * Used in: Fleet Control OS header, Driver PWA status bar.
+ * Three exports:
+ *   ConnectionStatusPill   — compact pill for TopNav header
+ *   BackendWarningBanner   — full-width alert for AppShell
+ *   DriverConnectionRow    — compact row for Driver PWA
+ *
+ * On mount: triggers probeConnection() if live mode is configured,
+ * so the status reflects reality immediately on page load.
  * ============================================================
  */
 
 import { useState, useEffect } from 'react'
-import { onConnectionStatus, getConnectionStatus } from './services_backend_backendService'
+import { onConnectionStatus, getConnectionStatus, probeConnection } from './services_backend_backendService'
 import { getSupabaseSettings } from './services_supabase_supabaseClient'
 import Icon from './components_ui_Icon'
 
@@ -59,27 +64,47 @@ const STATUS_CONFIG = {
   },
 }
 
-/**
- * Compact pill indicator for header bars.
- * Shows nothing if Supabase is not enabled (local mode is silent).
- */
-export function ConnectionStatusPill({ className = '' }) {
-  const [status, setStatus] = useState(getConnectionStatus())
+// ─── Shared init hook ─────────────────────────────────────────
+// Probes connection on mount if settings are enabled.
+// Returns [status, setStatus].
+function useConnectionStatus() {
+  const [status, setStatus] = useState(getConnectionStatus)
 
   useEffect(() => {
+    // Subscribe to status changes from backendService
     const unsub = onConnectionStatus(setStatus)
+
+    // Trigger probe if live mode is configured and status isn't already known
+    const settings = getSupabaseSettings()
+    if (settings.enabled && settings.url && settings.anonKey) {
+      const current = getConnectionStatus()
+      if (current === 'offline' || current === 'failed') {
+        probeConnection()
+      }
+    }
+
     return unsub
   }, [])
 
-  // Don't render if live mode is disabled
+  return status
+}
+
+/**
+ * Compact pill for the TopNav header.
+ * Renders nothing if Supabase is not enabled (local mode is silent).
+ */
+export function ConnectionStatusPill({ className = '' }) {
+  const status = useConnectionStatus()
   const settings = getSupabaseSettings()
+
+  // Don't render if live mode is disabled
   if (!settings.enabled) return null
 
   const cfg = STATUS_CONFIG[status] || STATUS_CONFIG.offline
 
   return (
     <div className={`flex items-center gap-1.5 px-2 py-1 rounded-full bg-slate-900/60 border border-slate-800/60 ${className}`}>
-      <span className={`relative flex h-2 w-2`}>
+      <span className="relative flex h-2 w-2">
         {cfg.pulse && (
           <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${cfg.dot} opacity-60`} />
         )}
@@ -97,24 +122,20 @@ export function ConnectionStatusPill({ className = '' }) {
 
 /**
  * Full-width warning banner — shown when backend is down in live mode.
- * Only renders when there's a problem worth surfacing.
+ * Only renders when there's an actionable problem to surface.
+ * Does NOT render when connected or connecting.
  */
 export function BackendWarningBanner() {
-  const [status, setStatus] = useState(getConnectionStatus())
-
-  useEffect(() => {
-    const unsub = onConnectionStatus(setStatus)
-    return unsub
-  }, [])
-
+  const status = useConnectionStatus()
   const settings = getSupabaseSettings()
+
   if (!settings.enabled) return null
   if (status === 'connected' || status === 'connecting') return null
 
   const messages = {
-    offline:        'Backend offline — displaying last known data. Changes will not sync.',
-    invalid_config: 'Invalid Supabase configuration. Go to Settings → Backend to fix.',
-    failed:         'Backend connection failed. Retrying… Live data unavailable.',
+    offline:        'Backend offline — displaying last known local data. Changes will not sync.',
+    invalid_config: 'Supabase config incomplete. Go to Settings → Backend to add your URL and anon key.',
+    failed:         'Backend connection failed. Retrying… Live sync unavailable.',
     sync_delayed:   'Sync delayed — some data may be stale.',
   }
 
@@ -122,7 +143,7 @@ export function BackendWarningBanner() {
   if (!msg) return null
 
   return (
-    <div className="flex items-center gap-2 px-4 py-2 bg-amber-500/10 border-b border-amber-500/20 text-xs text-amber-300">
+    <div className="flex items-center gap-2 px-4 py-2 bg-amber-500/10 border-b border-amber-500/20 text-xs text-amber-300 flex-shrink-0">
       <Icon name="AlertTriangle" size={13} className="text-amber-400 flex-shrink-0" />
       <span>{msg}</span>
     </div>
@@ -130,17 +151,12 @@ export function BackendWarningBanner() {
 }
 
 /**
- * Driver PWA compact status row.
+ * Compact status row for the Driver PWA.
  */
 export function DriverConnectionRow({ className = '' }) {
-  const [status, setStatus] = useState(getConnectionStatus())
-
-  useEffect(() => {
-    const unsub = onConnectionStatus(setStatus)
-    return unsub
-  }, [])
-
+  const status = useConnectionStatus()
   const settings = getSupabaseSettings()
+
   if (!settings.enabled) return null
 
   const cfg = STATUS_CONFIG[status] || STATUS_CONFIG.offline
