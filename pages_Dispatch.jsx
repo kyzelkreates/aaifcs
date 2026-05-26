@@ -38,8 +38,8 @@ function DriverSyncModal({ job, onClose }) {
 
   const driverId = job.driver_id
   if (!driverId) return (
-    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
-      <div className="bg-[#0d1426] border border-slate-800/60 rounded-xl p-6 w-full max-w-sm text-center">
+    <div className="fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center sm:p-4">
+      <div className="bg-[#0d1426] border border-slate-800/60 sm:rounded-xl rounded-t-xl p-6 w-full sm:max-w-sm text-center">
         <Icon name="AlertCircle" size={32} className="text-amber-400 mx-auto mb-3" />
         <p className="text-white font-semibold mb-1">No driver assigned</p>
         <p className="text-slate-500 text-xs mb-4">Assign a driver to this job before sending.</p>
@@ -93,8 +93,8 @@ function DriverSyncModal({ job, onClose }) {
   ]
 
   return (
-    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-      <div className="bg-[#0d1426] border border-slate-800/60 rounded-xl w-full max-w-md">
+    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center sm:p-4">
+      <div className="bg-[#0d1426] border border-slate-800/60 sm:rounded-xl rounded-t-xl w-full sm:max-w-md">
 
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800/60">
@@ -278,14 +278,16 @@ function TelemetryFeed({ events }) {
         <StatusDot status="online" />
         <span className="text-2xs text-slate-400 font-semibold uppercase tracking-wider">Live Driver Telemetry</span>
       </div>
-      <div className="space-y-1.5 max-h-40 overflow-y-auto scrollbar-none">
+      <div className="space-y-1.5 max-h-32 sm:max-h-40 overflow-y-auto scrollbar-none">
         {events.slice(0, 10).map((e, i) => (
-          <div key={i} className="flex items-center gap-3 text-2xs text-slate-500">
+          <div key={i} className="flex items-start sm:items-center gap-2 sm:gap-3 text-2xs text-slate-500 flex-wrap">
             <span className="text-slate-700 font-mono flex-shrink-0">{new Date(e.ts).toLocaleTimeString('en-GB', { hour12: false })}</span>
             <span className="text-cyan-400 font-mono flex-shrink-0">{e.driver_id?.slice(0, 8)}</span>
-            {e.speed != null && <span>🚗 {e.speed} km/h</span>}
-            {e.fuel  != null && <span>⛽ {e.fuel}%</span>}
-            {e.lat   != null && <span className="font-mono">{e.lat?.toFixed(4)}, {e.lng?.toFixed(4)}</span>}
+            <span className="flex items-center gap-2 flex-wrap">
+              {e.speed != null && <span>🚗 {e.speed} km/h</span>}
+              {e.fuel  != null && <span>⛽ {e.fuel}%</span>}
+              {e.lat   != null && <span className="font-mono hidden sm:inline">{e.lat?.toFixed(4)}, {e.lng?.toFixed(4)}</span>}
+            </span>
           </div>
         ))}
       </div>
@@ -298,65 +300,74 @@ function JobCard({ job, onAssign, onCancel, onComplete, onSync }) {
   const priColor = PRIORITY_COLORS[job.priority] || 'muted'
   const stsColor = STATUS_COLORS[job.status] || 'muted'
   return (
-    <div className={`bg-[#0d1426] border rounded-xl p-4 transition-all ${
+    <div className={`bg-[#0d1426] border rounded-xl p-3 sm:p-4 transition-all ${
       job.priority === 'urgent' ? 'border-red-500/30' : 'border-slate-800/60'
     }`}>
-      <div className="flex items-start justify-between gap-2 mb-2">
+      {/* Title + badges — badges wrap below title on very narrow screens */}
+      <div className="flex items-start justify-between gap-2 mb-2.5">
         <div className="flex-1 min-w-0">
-          <div className="text-sm font-semibold text-white truncate">{job.title || `Job #${job.id?.slice(0,8)}`}</div>
+          <div className="text-sm font-semibold text-white leading-snug line-clamp-2">{job.title || `Job #${job.id?.slice(0,8)}`}</div>
           <div className="text-xs text-slate-500 mt-0.5 truncate">
             {job.origin || '—'} → {job.destination || '—'}
           </div>
         </div>
-        <div className="flex items-center gap-1.5 flex-shrink-0">
+        <div className="flex flex-col items-end gap-1 flex-shrink-0">
+          <Badge variant={stsColor} size="sm">{job.status?.replace('_', ' ')}</Badge>
           <Badge variant={priColor} size="sm">
             <Icon name={PRIORITY_ICONS[job.priority] || 'Minus'} size={9} />
             {job.priority}
           </Badge>
-          <Badge variant={stsColor} size="sm">{job.status?.replace('_', ' ')}</Badge>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-slate-500 mb-3">
+      {/* Meta info — always single column, clean on mobile */}
+      <div className="flex flex-col gap-1.5 text-xs text-slate-500 mb-3">
         <div className="flex items-center gap-1.5">
-          <Icon name="User" size={11} className="text-slate-600" />
-          {job.driver_name || 'Unassigned'}
+          <Icon name="User" size={11} className="text-slate-600 flex-shrink-0" />
+          <span className="truncate">{job.driver_name || 'Unassigned'}</span>
         </div>
         <div className="flex items-center gap-1.5">
-          <Icon name="Truck" size={11} className="text-slate-600" />
-          {job.vehicle_reg || 'No vehicle'}
+          <Icon name="Truck" size={11} className="text-slate-600 flex-shrink-0" />
+          <span className="truncate">{job.vehicle_reg || 'No vehicle'}</span>
         </div>
         {job.scheduled_at && (
-          <div className="flex items-center gap-1.5 col-span-2">
-            <Icon name="Clock" size={11} className="text-slate-600" />
-            {formatDateTime(job.scheduled_at)}
+          <div className="flex items-center gap-1.5">
+            <Icon name="Clock" size={11} className="text-slate-600 flex-shrink-0" />
+            <span className="truncate">{formatDateTime(job.scheduled_at)}</span>
+          </div>
+        )}
+        {job.stop_count > 1 && (
+          <div className="flex items-center gap-1.5">
+            <Icon name="GitCommit" size={11} className="text-slate-600 flex-shrink-0" />
+            <span className="text-slate-600">{job.stop_count} stops</span>
           </div>
         )}
       </div>
 
-      <div className="flex items-center gap-2 flex-wrap">
+      {/* Action buttons — full width stacked on mobile */}
+      <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-2">
         {job.status === JOB_STATUS.PENDING && (
           <button onClick={() => onAssign?.(job)}
-            className="flex-1 py-1.5 text-xs bg-cyan-500/10 border border-cyan-500/20 text-cyan-400 rounded-lg hover:bg-cyan-500/20 transition-colors">
-            <Icon name="UserCheck" size={11} className="inline mr-1" />Assign
+            className="w-full sm:flex-1 py-2 sm:py-1.5 text-xs bg-cyan-500/10 border border-cyan-500/20 text-cyan-400 rounded-lg hover:bg-cyan-500/20 transition-colors flex items-center justify-center gap-1.5">
+            <Icon name="UserCheck" size={12} />Assign Driver
           </button>
         )}
         {[JOB_STATUS.ASSIGNED, JOB_STATUS.IN_PROGRESS].includes(job.status) && (
           <>
             <button onClick={() => onSync?.(job)}
-              className="flex-1 py-1.5 text-xs bg-violet-500/10 border border-violet-500/25 text-violet-400 rounded-lg hover:bg-violet-500/20 transition-colors">
-              <Icon name="Send" size={11} className="inline mr-1" />Send to Driver
+              className="w-full sm:flex-1 py-2 sm:py-1.5 text-xs bg-violet-500/10 border border-violet-500/25 text-violet-400 rounded-lg hover:bg-violet-500/20 transition-colors flex items-center justify-center gap-1.5">
+              <Icon name="Send" size={12} />Send to Driver
             </button>
             <button onClick={() => onComplete?.(job.id)}
-              className="py-1.5 px-3 text-xs bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-lg hover:bg-emerald-500/20 transition-colors">
-              <Icon name="Check" size={11} />
+              className="w-full sm:w-auto py-2 sm:py-1.5 px-3 text-xs bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-lg hover:bg-emerald-500/20 transition-colors flex items-center justify-center gap-1.5">
+              <Icon name="CheckCircle" size={12} /><span className="sm:hidden">Mark Complete</span>
             </button>
           </>
         )}
         {![JOB_STATUS.COMPLETED, JOB_STATUS.CANCELLED].includes(job.status) && (
           <button onClick={() => onCancel?.(job.id)}
-            className="py-1.5 px-2.5 text-xs text-red-400 border border-red-500/20 rounded-lg hover:bg-red-500/10 transition-colors">
-            <Icon name="X" size={11} />
+            className="w-full sm:w-auto py-2 sm:py-1.5 px-3 text-xs text-red-400 border border-red-500/20 rounded-lg hover:bg-red-500/10 transition-colors flex items-center justify-center gap-1.5">
+            <Icon name="X" size={12} /><span className="sm:hidden">Cancel Job</span>
           </button>
         )}
       </div>
@@ -388,8 +399,8 @@ function AssignModal({ job, drivers, vehicles, onClose, onSaved }) {
   }
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-      <div className="bg-[#0d1426] border border-slate-800/60 rounded-xl w-full max-w-sm">
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center sm:p-4">
+      <div className="bg-[#0d1426] border border-slate-800/60 sm:rounded-xl rounded-t-xl w-full sm:max-w-sm">
         <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800/60">
           <h2 className="font-semibold text-white text-sm">Assign Job</h2>
           <button onClick={onClose} className="text-slate-500 hover:text-white p-1"><Icon name="X" size={15} /></button>
@@ -472,8 +483,8 @@ function AssignModal({ job, drivers, vehicles, onClose, onSaved }) {
               </div>
             )
           })()}
-          <div className="flex gap-3">
-            <button type="button" onClick={onClose} className="flex-1 btn-ghost text-sm py-2">Cancel</button>
+          <div className="flex gap-2 sm:gap-3">
+            <button type="button" onClick={onClose} className="flex-1 btn-ghost text-sm py-2.5">Cancel</button>
             <button type="submit" disabled={saving || !driverId} className="flex-1 btn-primary text-sm py-2 disabled:opacity-40">
               Assign
             </button>
@@ -635,11 +646,11 @@ function JobModal({ onClose, onSaved, vehicles, drivers }) {
   const allGeocoded = stops.filter(s => s.address.trim()).every(s => s.geocoded)
 
   return (
-    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-3">
-      <div className="bg-[#0a0f1e] border border-slate-800/60 rounded-2xl w-full max-w-2xl max-h-[96vh] flex flex-col shadow-2xl">
+    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center sm:p-3">
+      <div className="bg-[#0a0f1e] border border-slate-800/60 sm:rounded-2xl rounded-t-2xl w-full sm:max-w-2xl max-h-[95vh] sm:max-h-[96vh] flex flex-col shadow-2xl">
 
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800/50 flex-shrink-0">
+        <div className="flex items-center justify-between px-4 sm:px-6 py-3 sm:py-4 border-b border-slate-800/50 flex-shrink-0">
           <div>
             <h2 className="font-semibold text-white">New Dispatch Job</h2>
             <p className="text-2xs text-slate-600 mt-0.5">Route planner · Vehicle-profile aware · Syncs to driver app</p>
@@ -650,7 +661,7 @@ function JobModal({ onClose, onSaved, vehicles, drivers }) {
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-5">
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4 sm:space-y-5">
 
           {/* Job basics */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -979,26 +990,28 @@ export default function Dispatch() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="px-5 py-4 border-b border-slate-800/60 flex-shrink-0">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h1 className="font-display text-xl font-bold text-white">Dispatch Center</h1>
-            <p className="text-slate-500 text-xs mt-0.5">
-              {jobs.length} job{jobs.length !== 1 ? 's' : ''} · {counts.pending || 0} pending
+      <div className="px-4 sm:px-5 py-3 sm:py-4 border-b border-slate-800/60 flex-shrink-0">
+        {/* Title row — stacks gracefully on mobile */}
+        <div className="flex items-center justify-between gap-3 mb-3">
+          <div className="min-w-0">
+            <h1 className="font-display text-lg sm:text-xl font-bold text-white leading-tight">Dispatch Center</h1>
+            <p className="text-slate-500 text-xs mt-0.5 truncate">
+              {safeJobs.length} job{safeJobs.length !== 1 ? 's' : ''} · {counts.pending || 0} pending
             </p>
           </div>
-          <button onClick={() => setCreate(true)} className="btn-primary text-sm px-4 py-2 flex items-center gap-1.5">
-            <Icon name="Plus" size={14} /> New Job
+          <button onClick={() => setCreate(true)} className="btn-primary text-xs sm:text-sm px-3 sm:px-4 py-2 flex items-center gap-1.5 flex-shrink-0 whitespace-nowrap">
+            <Icon name="Plus" size={13} /> <span className="hidden xs:inline">New Job</span><span className="xs:hidden">New</span>
           </button>
         </div>
-        <div className="flex items-center gap-1 overflow-x-auto scrollbar-none">
+        {/* Status filter tabs — horizontal scroll on mobile */}
+        <div className="flex items-center gap-0.5 sm:gap-1 overflow-x-auto scrollbar-none -mx-1 px-1">
           {STATUS_TABS.map(t => (
             <button key={t.key} onClick={() => setFilter(t.key)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium whitespace-nowrap transition-all ${
+              className={`flex items-center gap-1 sm:gap-1.5 px-2 sm:px-3 py-1.5 rounded-md text-xs font-medium whitespace-nowrap transition-all flex-shrink-0 ${
                 filter === t.key ? 'bg-slate-800 text-white' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-800/40'
               }`}>
               {t.label}
-              <span className={`text-2xs px-1.5 py-0.5 rounded-full ${filter === t.key ? 'bg-cyan-500/20 text-cyan-400' : 'bg-slate-800 text-slate-600'}`}>
+              <span className={`text-2xs px-1 sm:px-1.5 py-0.5 rounded-full ${filter === t.key ? 'bg-cyan-500/20 text-cyan-400' : 'bg-slate-800 text-slate-600'}`}>
                 {t.count}
               </span>
             </button>
@@ -1006,7 +1019,7 @@ export default function Dispatch() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto p-5 space-y-4">
+      <div className="flex-1 overflow-auto p-3 sm:p-5 space-y-3 sm:space-y-4">
         {/* Live telemetry feed */}
         <TelemetryFeed events={telEvents} />
 
