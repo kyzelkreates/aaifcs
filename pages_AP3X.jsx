@@ -204,12 +204,17 @@ export default function AP3X() {
   const mapRef   = useRef(null)
 
   // ── Load jobs ─────────────────────────────────────────────
-  const loadJobs = useCallback(() => {
-    const all = dispatchService.fetchJobs({ driver_id: driverId })
-    const active = all.find(j => j.status === JOB_STATUS.IN_PROGRESS) ||
-                   all.find(j => j.status === JOB_STATUS.ASSIGNED)
-    setJobs(all.filter(j => j.status !== JOB_STATUS.CANCELLED && j.status !== JOB_STATUS.COMPLETED))
-    setActiveJob(prev => active || (prev?.id ? all.find(j => j.id === prev.id) || null : null))
+  const loadJobs = useCallback(async () => {
+    try {
+      const result = await dispatchService.fetchJobs({ driver_id: driverId })
+      const all = Array.isArray(result) ? result : []
+      const active = all.find(j => j.status === JOB_STATUS.IN_PROGRESS) ||
+                     all.find(j => j.status === JOB_STATUS.ASSIGNED)
+      setJobs(all.filter(j => j.status !== JOB_STATUS.CANCELLED && j.status !== JOB_STATUS.COMPLETED))
+      setActiveJob(prev => active || (prev?.id ? all.find(j => j.id === prev.id) || null : null))
+    } catch (e) {
+      console.error('[AP3X:AP3X] loadJobs error:', e)
+    }
   }, [driverId])
 
   useEffect(() => {

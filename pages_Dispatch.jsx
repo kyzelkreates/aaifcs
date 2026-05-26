@@ -925,10 +925,17 @@ export default function Dispatch() {
   const [filter,     setFilter]    = useState(null)
   const [telEvents,  setTelEvents] = useState([])
 
-  const load = useCallback(() => {
+  const load = useCallback(async () => {
     setLoading(true)
-    try { setJobs(dispatchService.fetchJobs()) }
-    finally { setLoading(false) }
+    try {
+      const result = await dispatchService.fetchJobs()
+      setJobs(Array.isArray(result) ? result : [])
+    } catch (e) {
+      console.error('[AP3X:Dispatch] fetchJobs error:', e)
+      setJobs([])
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
   useEffect(() => {
@@ -954,15 +961,16 @@ export default function Dispatch() {
     load()
   }
 
+  const safeJobs = Array.isArray(jobs) ? jobs : []
   const counts = Object.values(JOB_STATUS).reduce((acc, s) => {
-    acc[s] = jobs.filter(j => j.status === s).length
+    acc[s] = safeJobs.filter(j => j.status === s).length
     return acc
   }, {})
 
-  const filtered = jobs.filter(j => !filter || j.status === filter)
+  const filtered = safeJobs.filter(j => !filter || j.status === filter)
 
   const STATUS_TABS = [
-    { key: null,                   label: 'All',         count: jobs.length },
+    { key: null,                   label: 'All',         count: safeJobs.length },
     { key: JOB_STATUS.PENDING,     label: 'Pending',     count: counts.pending     || 0 },
     { key: JOB_STATUS.ASSIGNED,    label: 'Assigned',    count: counts.assigned    || 0 },
     { key: JOB_STATUS.IN_PROGRESS, label: 'In Progress', count: counts.in_progress || 0 },
