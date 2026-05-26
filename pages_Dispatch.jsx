@@ -370,14 +370,21 @@ function AssignModal({ job, drivers, vehicles, onClose, onSaved }) {
   const [vehicleId, setVehicleId] = useState(job.vehicle_id || '')
   const [saving,    setSaving]    = useState(false)
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault(); setSaving(true)
-    const driver  = drivers.find(d => d.id === driverId)
-    const vehicle = vehicles.find(v => v.id === vehicleId)
-    dispatchService.assignJob(job.id, driverId, vehicleId,
-      driver?.full_name, vehicle?.reg_number)
-    setSaving(false)
-    onSaved?.(); onClose?.()
+    try {
+      const driver  = drivers.find(d => d.id === driverId)
+      const vehicle = vehicles.find(v => v.id === vehicleId)
+      await dispatchService.assignJob(
+        job.id, driverId, vehicleId,
+        driver?.full_name || driver?.name, vehicle?.reg_number
+      )
+      onSaved?.(); onClose?.()
+    } catch (err) {
+      console.error('[AP3X:Dispatch] assignJob failed:', err)
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (

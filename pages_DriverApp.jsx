@@ -49,6 +49,10 @@ import {
   getLiveDriverPositions,
   getDriverSyncPairing,
 } from './services_sync_liveSync'
+import { dispatchService } from './services_dispatch_dispatchService'
+import { recoverOfflineTasks, onConnectionStatus, getConnectionStatus } from './services_backend_backendService'
+import { getSupabaseSettings } from './services_supabase_supabaseClient'
+import { DriverConnectionRow } from './components_ui_ConnectionStatus'
 
 
 // ── Fix default Leaflet marker icons ─────────────────────────
@@ -709,6 +713,9 @@ function DriverAppMain({ profile, onLogout }) {
   // ── Jobs state ───────────────────────────────────────────────
   const [jobs,       setJobs]      = useState(() => loadJobs(profile.id))
   const [activeJob,  setActiveJob] = useState(null)
+  const [newJobBanner, setNewJobBanner] = useState(null)   // {title} — shown when live job arrives
+  const [offlinePending, setOfflinePending] = useState([]) // queued status updates during offline
+  const [backendStatus, setBackendStatus] = useState(getConnectionStatus())
   const [jobStops,   setJobStops]  = useState([])    // [{lat,lng,name,idx}] all geocoded stops
   const [stopRoutes, setStopRoutes] = useState([])   // [[lat,lng]...] polylines per stop segment
 
@@ -930,11 +937,62 @@ function DriverAppMain({ profile, onLogout }) {
     return unsub
   }, [])
 
-  // ── Refresh jobs when localStorage changes ────────────────────
+  // ── Refresh jobs: local storage + live Supabase subscription ──
   useEffect(() => {
+    // Local storage listener (same-device tab sync)
     const onStorage = () => setJobs(loadJobs(profile.id))
     window.addEventListener('storage', onStorage)
-    return () => window.removeEventListener('storage', onStorage)
+
+    // Live Supabase subscription for Driver PWA job assignment
+    const sbSettings = getSupabaseSettings()
+    let unsubLive = () => {}
+
+    if (sbSettings.enabled) {
+      unsubLive = dispatchService.subscribeToDriverJobs(profile.id, (liveTasks) => {
+        // liveTasks is the refreshed array from backend
+        const tasks = Array.isArray(liveTasks) ? liveTasks : []
+        if (tasks.length > 0) {
+          setJobs(tasks)
+          // Find newly assigned tasks (assigned in last 30 seconds)
+          const thirtySecsAgo = new Date(Date.now() - 30000).toISOString()
+          const newlyAssigned = tasks.find(t =>
+            t.status === 'assigned' &&
+            t.assigned_at && t.assigned_at > thirtySecsAgo
+          )
+          if (newlyAssigned) {
+            setNewJobBanner(newlyAssigned)
+            setTimeout(() => setNewJobBanner(null), 8000)
+          }
+        }
+      })
+    }
+
+    // Connection status listener
+    const unsubStatus = onConnectionStatus(setBackendStatus)
+
+    // Offline recovery on reconnect
+    let wasOffline = false
+    const handleOnline = async () => {
+      if (wasOffline) {
+        wasOffline = false
+        const { ok, tasks } = await recoverOfflineTasks(profile.id, offlinePending)
+        if (ok && tasks.length > 0) {
+          setJobs(tasks)
+          setOfflinePending([])
+        }
+      }
+    }
+    const handleOffline = () => { wasOffline = true }
+    window.addEventListener('online', handleOnline)
+    window.addEventListener('offline', handleOffline)
+
+    return () => {
+      window.removeEventListener('storage', onStorage)
+      window.removeEventListener('online', handleOnline)
+      window.removeEventListener('offline', handleOffline)
+      unsubLive()
+      unsubStatus()
+    }
   }, [profile.id])
 
   // ── Fatigue monitor ───────────────────────────────────────────
@@ -1358,6 +1416,27 @@ function DriverAppMain({ profile, onLogout }) {
       style={{ WebkitUserSelect: 'none', userSelect: 'none' }}>
 
 
+
+      {/* ── New Job Banner (live assignment notification) ─────── */}
+      {newJobBanner && (
+        <div className="absolute top-0 left-0 right-0 z-50 mx-3 mt-16 animate-in slide-in-from-top duration-300">
+          <div className="flex items-center gap-3 p-3 rounded-xl bg-violet-600/90 border border-violet-400/50 shadow-lg backdrop-blur-sm">
+            <div className="w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center flex-shrink-0">
+              <Icon name="Package" size={16} className="text-white" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-bold text-white uppercase tracking-wide">New Job Assigned</div>
+              <div className="text-xs text-violet-200 truncate">{newJobBanner.title}</div>
+            </div>
+            <button
+              onClick={() => { setNewJobBanner(null); setTab('jobs') }}
+              className="text-white/70 hover:text-white p-1"
+            >
+              <Icon name="ArrowRight" size={14} />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* ── Top Bar ──────────────────────────────────────────── */}
       <div className="flex items-center gap-2 px-3 py-2 bg-[#0d1426] border-b border-violet-500/15 flex-shrink-0">

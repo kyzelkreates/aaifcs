@@ -12,6 +12,7 @@ import { Outlet } from 'react-router-dom'
 import Sidebar from './layouts_Sidebar'
 import TopNav  from './layouts_TopNav'
 import { useAppStore } from './core_storage'
+import { BackendWarningBanner } from './components_ui_ConnectionStatus'
 
 export default function AppShell() {
   const sidebarExpanded = useAppStore(s => s.sidebarExpanded)
@@ -40,6 +41,7 @@ export default function AppShell() {
       {/* Main content — always full width */}
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
         <TopNav />
+        <BackendWarningBanner />
         <main className="flex-1 overflow-auto scrollbar-none">
           <Outlet />
         </main>

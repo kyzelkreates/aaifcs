@@ -24,6 +24,10 @@ import { AI_PROVIDERS } from './services_ai_aiConfig'
 import { MAP_PROVIDERS, PROVIDER_DEFINITIONS } from './services_maps_mapProviders'
 import { getRuntimeKey, setRuntimeKey, RUNTIME_KEYS } from './services_maps_runtimeKeys'
 import { ROUTES } from './config_routes'
+import {
+  getSupabaseSettings, saveSupabaseSettings, testSupabaseConnection, destroySupabaseClient,
+} from './services_supabase_supabaseClient'
+import { probeConnection, onConnectionStatus } from './services_backend_backendService'
 
 // ─── Section tabs ─────────────────────────────────────────────
 const TABS = [
@@ -34,6 +38,7 @@ const TABS = [
   { key: 'security',     label: 'Security',      icon: 'Shield' },
   { key: 'integrations', label: 'Integrations',  icon: 'Plug' },
   { key: 'federation',   label: 'Federation',    icon: 'Globe2' },
+  { key: 'backend',      label: 'Backend',       icon: 'Database' },
 ]
 
 // ─── Setting Row ──────────────────────────────────────────────
@@ -1319,6 +1324,176 @@ function FederationPanel() {
 }
 
 // ─── Settings Page ────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────
+// Backend Configuration Panel — Supabase Live Mode
+// ─────────────────────────────────────────────────────────────
+function BackendPanel() {
+  const stored = getSupabaseSettings()
+  const [url,        setUrl]        = useState(stored.url || '')
+  const [anonKey,    setAnonKey]    = useState(stored.anonKey || '')
+  const [enabled,    setEnabled]    = useState(stored.enabled || false)
+  const [connStatus, setConnStatus] = useState(stored.connectionStatus || 'offline')
+  const [testing,    setTesting]    = useState(false)
+  const [saveMsg,    setSaveMsg]    = useState(null)
+  const [showKey,    setShowKey]    = useState(false)
+
+  // Live status updates from backend service
+  useEffect(() => {
+    const unsub = onConnectionStatus((s) => setConnStatus(s))
+    return unsub
+  }, [])
+
+  const STATUS_CFG = {
+    connected:      { color: 'text-emerald-400 border-emerald-500/30 bg-emerald-500/8', label: 'Connected' },
+    connecting:     { color: 'text-cyan-400 border-cyan-500/30 bg-cyan-500/8', label: 'Connecting…' },
+    offline:        { color: 'text-slate-400 border-slate-700 bg-slate-800/40', label: 'Offline' },
+    invalid_config: { color: 'text-amber-400 border-amber-500/30 bg-amber-500/8', label: 'Invalid Config' },
+    failed:         { color: 'text-red-400 border-red-500/30 bg-red-500/8', label: 'Connection Failed' },
+    sync_delayed:   { color: 'text-amber-400 border-amber-500/30 bg-amber-500/8', label: 'Sync Delayed' },
+  }
+  const sc = STATUS_CFG[connStatus] || STATUS_CFG.offline
+
+  const handleSave = () => {
+    const settings = { enabled, url: url.trim(), anonKey: anonKey.trim(), connectionStatus: connStatus }
+    saveSupabaseSettings(settings)
+    if (!enabled) destroySupabaseClient()
+    setSaveMsg('Saved')
+    setTimeout(() => setSaveMsg(null), 2500)
+  }
+
+  const handleTest = async () => {
+    if (!url.trim() || !anonKey.trim()) {
+      setConnStatus('invalid_config')
+      return
+    }
+    setTesting(true)
+    setConnStatus('connecting')
+    const { ok, error } = await testSupabaseConnection(url.trim(), anonKey.trim())
+    if (ok) {
+      setConnStatus('connected')
+      // Auto-save on successful test
+      saveSupabaseSettings({ enabled, url: url.trim(), anonKey: anonKey.trim(), connectionStatus: 'connected' })
+    } else {
+      setConnStatus('failed')
+      console.warn('[AP3X:Backend] Test failed:', error)
+    }
+    setTesting(false)
+  }
+
+  const handleToggle = (val) => {
+    setEnabled(val)
+    if (!val) {
+      destroySupabaseClient()
+      setConnStatus('offline')
+    }
+  }
+
+  return (
+    <div className="space-y-0">
+      <SectionHead label="Backend Configuration" />
+
+      {/* Warning */}
+      <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-500/5 border border-amber-500/20 mb-4">
+        <Icon name="AlertTriangle" size={14} className="text-amber-400 mt-0.5 flex-shrink-0" />
+        <p className="text-xs text-amber-300/80">
+          Live backend mode connects AP3X systems to external Supabase infrastructure.
+          Only use your project&apos;s <strong>anon/public key</strong> — never the service_role key.
+        </p>
+      </div>
+
+      {/* Status badge */}
+      <SettingRow label="Connection Status" sub="Real-time backend sync state">
+        <span className={`text-xs px-3 py-1 rounded-full border font-semibold uppercase tracking-wide ${sc.color}`}>
+          {sc.label}
+        </span>
+      </SettingRow>
+
+      {/* Enable toggle */}
+      <SettingRow label="Enable Live Backend" sub="Connect Fleet Control OS and Driver PWA to Supabase">
+        <Toggle value={enabled} onChange={handleToggle} />
+      </SettingRow>
+
+      <SectionHead label="Supabase Credentials" />
+
+      {/* URL field */}
+      <div className="space-y-1.5 py-2">
+        <label className="text-xs text-slate-400 font-medium">Supabase Project URL</label>
+        <input
+          type="url"
+          value={url}
+          onChange={e => setUrl(e.target.value)}
+          placeholder="https://xxxxxxxxxxxx.supabase.co"
+          className="apex-input w-full font-mono text-sm"
+          autoComplete="off"
+          spellCheck={false}
+        />
+      </div>
+
+      {/* Anon key field */}
+      <div className="space-y-1.5 py-2">
+        <div className="flex items-center justify-between">
+          <label className="text-xs text-slate-400 font-medium">Supabase Anon Key (public)</label>
+          <button
+            onClick={() => setShowKey(v => !v)}
+            className="text-xs text-slate-600 hover:text-slate-400 flex items-center gap-1"
+          >
+            <Icon name={showKey ? 'EyeOff' : 'Eye'} size={12} />
+            {showKey ? 'Hide' : 'Show'}
+          </button>
+        </div>
+        <input
+          type={showKey ? 'text' : 'password'}
+          value={anonKey}
+          onChange={e => setAnonKey(e.target.value)}
+          placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9…"
+          className="apex-input w-full font-mono text-xs"
+          autoComplete="new-password"
+          spellCheck={false}
+        />
+        <p className="text-2xs text-slate-600">
+          Found in: Supabase Dashboard → Project Settings → API → Project API keys (anon public)
+        </p>
+      </div>
+
+      {/* Buttons */}
+      <div className="flex items-center gap-3 pt-3">
+        <button
+          onClick={handleSave}
+          className="btn-primary text-sm px-4 py-2"
+        >
+          Save Configuration
+        </button>
+        <button
+          onClick={handleTest}
+          disabled={testing || !url.trim() || !anonKey.trim()}
+          className="text-sm px-4 py-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800/60 transition-all disabled:opacity-40 flex items-center gap-2"
+        >
+          {testing && <span className="w-3 h-3 border border-t-cyan-400 border-slate-600 rounded-full animate-spin" />}
+          {testing ? 'Testing…' : 'Test Connection'}
+        </button>
+        {saveMsg && (
+          <span className="text-xs text-emerald-400 flex items-center gap-1">
+            <Icon name="CheckCircle2" size={13} /> {saveMsg}
+          </span>
+        )}
+      </div>
+
+      <SectionHead label="Database Schema" />
+      <div className="p-3 rounded-lg bg-slate-900/60 border border-slate-800/60 text-xs text-slate-500 font-mono space-y-1">
+        <div className="text-slate-400 font-semibold mb-1.5">Required tables:</div>
+        {['drivers', 'tasks', 'fleet_nodes', 'dashboard_events', 'settings'].map(t => (
+          <div key={t} className="flex items-center gap-2">
+            <Icon name="Table2" size={10} className="text-slate-600" />
+            <span>{t}</span>
+          </div>
+        ))}
+        <div className="text-slate-600 mt-2 font-sans">See supabase_schema.sql for full schema</div>
+      </div>
+    </div>
+  )
+}
+
 export default function Settings() {
   const { user } = useAuthStore(s => ({ user: s.user }))
   const [activeTab, setActiveTab] = useState('profile')
@@ -1331,6 +1506,7 @@ export default function Settings() {
     security:     <SecurityPanel user={user} />,
     integrations: <IntegrationsPanel />,
     federation:   <FederationPanel />,
+    backend:      <BackendPanel />,
   }
 
   return (

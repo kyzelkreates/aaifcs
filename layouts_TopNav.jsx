@@ -13,6 +13,7 @@ import StatusDot from './components_ui_StatusDot'
 import { useAppStore } from './core_storage'
 import { useAuth } from './hooks_useAuth'
 import { NAV_ITEMS } from './config_routes'
+import { ConnectionStatusPill, BackendWarningBanner } from './components_ui_ConnectionStatus'
 
 // ─── Breadcrumb ───────────────────────────────────────────────
 function Breadcrumb({ pathname }) {
@@ -166,6 +167,9 @@ export default function TopNav() {
       <div className="flex items-center gap-3">
         <div className="hidden md:flex">
           <SystemStatusPill status={systemStatus} />
+        </div>
+        <div className="hidden sm:flex">
+          <ConnectionStatusPill />
         </div>
         <div className="hidden lg:flex items-center gap-2 bg-violet-500/5 border border-violet-500/20 rounded-full px-3 py-1.5">
           <Icon name="Cpu" size={12} className="text-violet-400" />
