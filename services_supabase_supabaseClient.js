@@ -42,14 +42,39 @@ const IGNORABLE_ERROR_CODES = new Set([
 ])
 
 // ─── Read persisted config ────────────────────────────────────
+// Priority order:
+//   1. localStorage (set via Settings → Backend panel by fleet operator)
+//   2. VITE_ build-time env vars (baked in at build/deploy time)
+//   3. Empty/disabled fallback
+//
+// This means the Driver PWA on a separate device will auto-connect
+// as long as VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are set
+// in the .env file before the build, even without touching Settings.
 export function getSupabaseSettings() {
   try {
     const raw = localStorage.getItem(SB_SETTINGS_KEY)
-    if (!raw) return { enabled: false, url: '', anonKey: '', connectionStatus: 'offline' }
-    return JSON.parse(raw)
-  } catch {
-    return { enabled: false, url: '', anonKey: '', connectionStatus: 'offline' }
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      // If localStorage has a valid config, use it (fleet operator's explicit settings)
+      if (parsed.url && parsed.anonKey) return parsed
+    }
+  } catch {}
+
+  // Fallback to build-time env vars — works for Driver PWA on any device
+  // without the operator needing to configure Settings on that device.
+  const envUrl = typeof import.meta !== 'undefined'
+    ? (import.meta.env?.VITE_SUPABASE_URL || '')
+    : ''
+  const envKey = typeof import.meta !== 'undefined'
+    ? (import.meta.env?.VITE_SUPABASE_ANON_KEY || '')
+    : ''
+
+  if (envUrl && envKey) {
+    console.debug('[AP3X:Supabase] Using VITE_ env var config (PWA device mode)')
+    return { enabled: true, url: envUrl, anonKey: envKey, connectionStatus: 'offline', _fromEnv: true }
   }
+
+  return { enabled: false, url: '', anonKey: '', connectionStatus: 'offline' }
 }
 
 export function saveSupabaseSettings(patch) {

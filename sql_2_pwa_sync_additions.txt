@@ -1,0 +1,123 @@
+-- ============================================================
+-- AP3X Fleet Control OS — PWA JOB SYNC ADDITIONS (SQL 2 of 2)
+-- Run this AFTER sql_1_original_schema.txt
+--
+-- What this adds:
+--   1. Extra columns on tasks  — full PWA job lifecycle fields
+--   2. driver_locations table  — real-time cross-device GPS
+--   3. push_subscriptions table — Web Push notification endpoints
+--   4. Realtime publications   — for both new tables
+--   5. updated_at trigger      — for driver_locations
+-- ============================================================
+
+-- ─── 1. tasks: PWA lifecycle columns ─────────────────────────
+-- These track the full job state as the driver moves through it
+-- on their phone: assigned → accepted → in_progress → completed
+
+ALTER TABLE public.tasks
+  ADD COLUMN IF NOT EXISTS accepted_at      TIMESTAMPTZ,   -- driver tapped Accept
+  ADD COLUMN IF NOT EXISTS started_at       TIMESTAMPTZ,   -- driver tapped Start / Navigate
+  ADD COLUMN IF NOT EXISTS cancelled_at     TIMESTAMPTZ,   -- job cancelled
+  ADD COLUMN IF NOT EXISTS cancel_reason    TEXT,          -- why it was cancelled
+  ADD COLUMN IF NOT EXISTS completion_notes TEXT,          -- driver notes on completion
+  ADD COLUMN IF NOT EXISTS stops            JSONB,         -- array of stop addresses/coords
+  ADD COLUMN IF NOT EXISTS waypoints        JSONB,         -- intermediate waypoints
+  ADD COLUMN IF NOT EXISTS pickup_address   TEXT,          -- pickup location
+  ADD COLUMN IF NOT EXISTS dropoff_address  TEXT,          -- dropoff location
+  ADD COLUMN IF NOT EXISTS vehicle_id       UUID,          -- assigned vehicle
+  ADD COLUMN IF NOT EXISTS vehicle_reg      TEXT,          -- vehicle registration plate
+  ADD COLUMN IF NOT EXISTS driver_name      TEXT;          -- denormalised driver name
+
+-- Index for efficient querying of driver jobs by status
+CREATE INDEX IF NOT EXISTS idx_tasks_driver_status
+  ON public.tasks(assigned_driver, status)
+  WHERE status NOT IN ('completed','cancelled');
+
+-- ─── 2. driver_locations — real-time GPS per driver ──────────
+-- The Driver PWA upserts here every 5 seconds via pushDriverLocation().
+-- The fleet Control OS dashboard and Navigation map subscribe to
+-- Supabase Realtime on this table for instant cross-device GPS.
+
+CREATE TABLE IF NOT EXISTS public.driver_locations (
+  driver_id   UUID PRIMARY KEY REFERENCES public.drivers(id) ON DELETE CASCADE,
+  lat         DOUBLE PRECISION NOT NULL DEFAULT 0,
+  lng         DOUBLE PRECISION NOT NULL DEFAULT 0,
+  speed       DOUBLE PRECISION NOT NULL DEFAULT 0,   -- km/h
+  heading     DOUBLE PRECISION NOT NULL DEFAULT 0,   -- degrees 0-360
+  accuracy    DOUBLE PRECISION,                       -- GPS accuracy metres
+  status      TEXT NOT NULL DEFAULT 'offline'
+                CHECK (status IN ('offline','online','en_route','idle','on_break')),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Auto-update updated_at on every GPS upsert
+DROP TRIGGER IF EXISTS set_driver_locations_updated_at ON public.driver_locations;
+CREATE TRIGGER set_driver_locations_updated_at
+  BEFORE UPDATE ON public.driver_locations
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+ALTER TABLE public.driver_locations ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Public read driver_locations"  ON public.driver_locations FOR SELECT USING (true);
+CREATE POLICY "Public write driver_locations" ON public.driver_locations FOR ALL    USING (true);
+
+-- ─── 3. push_subscriptions — Web Push endpoint storage ───────
+-- Each driver device registers its Web Push subscription here
+-- after the browser prompts for notification permission.
+-- The backend (or a Supabase Edge Function) reads these to send
+-- push notifications when a new job is dispatched.
+
+CREATE TABLE IF NOT EXISTS public.push_subscriptions (
+  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  driver_id   UUID NOT NULL REFERENCES public.drivers(id) ON DELETE CASCADE,
+  endpoint    TEXT NOT NULL UNIQUE,     -- Push service URL (unique per device)
+  p256dh      TEXT NOT NULL,            -- Browser public key
+  auth        TEXT NOT NULL,            -- Auth secret
+  device_name TEXT,                     -- e.g. "Chrome on Samsung Galaxy"
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_seen   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_push_subs_driver ON public.push_subscriptions(driver_id);
+
+ALTER TABLE public.push_subscriptions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Public read push_subscriptions"  ON public.push_subscriptions FOR SELECT USING (true);
+CREATE POLICY "Public write push_subscriptions" ON public.push_subscriptions FOR ALL    USING (true);
+
+-- ─── 4. Realtime publications ─────────────────────────────────
+-- driver_locations: fleet map receives live GPS from driver phones
+-- push_subscriptions: not strictly needed for realtime but included
+--                     in case the backend wants to react to new registrations
+ALTER PUBLICATION supabase_realtime ADD TABLE public.driver_locations;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.push_subscriptions;
+
+-- ─── 5. Useful view: active_drivers ───────────────────────────
+-- Joins drivers + their latest GPS location + current task.
+-- Fleet dashboard can query this single view for all live data.
+CREATE OR REPLACE VIEW public.active_drivers AS
+SELECT
+  d.id,
+  d.name,
+  d.status,
+  d.online,
+  d.current_task,
+  d.updated_at            AS driver_updated_at,
+  dl.lat,
+  dl.lng,
+  dl.speed,
+  dl.heading,
+  dl.accuracy,
+  dl.status               AS location_status,
+  dl.updated_at           AS location_updated_at,
+  t.id                    AS task_id,
+  t.title                 AS task_title,
+  t.status                AS task_status,
+  t.priority              AS task_priority,
+  t.assigned_at,
+  t.pickup_address,
+  t.dropoff_address
+FROM public.drivers       d
+LEFT JOIN public.driver_locations dl ON dl.driver_id = d.id
+LEFT JOIN public.tasks            t  ON t.id = d.current_task;
+
+-- Grant read access to the view
+GRANT SELECT ON public.active_drivers TO anon, authenticated;

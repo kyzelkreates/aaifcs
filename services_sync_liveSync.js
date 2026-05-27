@@ -262,7 +262,7 @@ export function pushDriverLocation(driverId, vehicleId, locationData) {
     ts:         tsNow(),
   }
 
-  // Write to per-vehicle key (fleet map reads this)
+  // Write to per-vehicle key (fleet map reads this — same-device fallback)
   writeJSON(`${LIVE_TEL_PREFIX}${vehicleId}`, payload)
   writeJSON(`${LIVE_LOC_PREFIX}${driverId}`, payload)
 
@@ -273,6 +273,29 @@ export function pushDriverLocation(driverId, vehicleId, locationData) {
     drivers[driverId].online = true
     drivers[driverId].telemetry = payload
     writeJSON(ACTIVE_DRIVERS_KEY, drivers)
+  }
+
+  // ── Supabase upsert (cross-device GPS delivery to fleet map) ──
+  // Fire-and-forget: don't await — GPS pushes every 5s and must not block UI
+  if (isSupabaseReady()) {
+    const sb = getSupabaseClient()
+    if (sb) {
+      sb.from('driver_locations')
+        .upsert({
+          driver_id:  driverId,
+          lat:        locationData.lat,
+          lng:        locationData.lng,
+          speed:      locationData.speed ?? 0,
+          heading:    locationData.heading ?? 0,
+          accuracy:   locationData.accuracy ?? 0,
+          status:     locationData.status ?? 'en_route',
+          updated_at: tsNow(),
+        }, { onConflict: 'driver_id' })
+        .then(({ error }) => {
+          if (error) console.debug('[LiveSync] driver_locations upsert error:', error.message)
+        })
+        .catch(() => {})
+    }
   }
 
   // Broadcast to fleet map (same device / same-origin tabs)
@@ -307,21 +330,46 @@ export function getLiveDriverPositions() {
  */
 export function subscribeToDriverLocations(callback) {
   const ch = getChannel()
-  if (!ch) return () => {}
-  const handler = (evt) => {
-    if (evt.data?.type === 'DRIVER_LOCATION') callback(evt.data.payload)
-  }
-  ch.addEventListener('message', handler)
+  let supabaseChannel = null
 
-  // Also poll localStorage for cross-session drivers (different device, same network)
+  // ── Supabase Realtime: cross-device live GPS (primary) ────────
+  if (isSupabaseReady()) {
+    const sb = getSupabaseClient()
+    if (sb) {
+      supabaseChannel = sb
+        .channel('ap3x-driver-locations')
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'driver_locations' },
+          (payload) => {
+            const row = payload.new
+            if (row) callback({ ...row, _fromSupabase: true })
+          }
+        )
+        .subscribe((status) => {
+          console.debug('[LiveSync] driver_locations realtime:', status)
+        })
+    }
+  }
+
+  // ── BroadcastChannel: same-device fallback ────────────────────
+  const handler = ch
+    ? (evt) => { if (evt.data?.type === 'DRIVER_LOCATION') callback(evt.data.payload) }
+    : null
+  if (ch && handler) ch.addEventListener('message', handler)
+
+  // ── Poll localStorage every 5s (cross-tab, offline fallback) ──
   const interval = setInterval(() => {
     const positions = getLiveDriverPositions()
     if (positions.length > 0) callback({ _bulk: true, positions })
   }, 5000)
 
   return () => {
-    ch.removeEventListener('message', handler)
+    if (ch && handler) ch.removeEventListener('message', handler)
     clearInterval(interval)
+    if (supabaseChannel) {
+      try { getSupabaseClient()?.removeChannel(supabaseChannel) } catch {}
+    }
   }
 }
 
