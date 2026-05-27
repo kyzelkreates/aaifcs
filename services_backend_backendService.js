@@ -254,6 +254,76 @@ export async function getTasks(filter = {}) {
   return jobTable.list(filter)
 }
 
+// ─── CRITICAL: Create job → Supabase (pushes to Driver PWA) ──
+// This is the single source of truth for job creation.
+// In live mode: inserts into Supabase tasks table, which triggers
+// Supabase Realtime → pwaJobSync on driver phones instantly.
+// In local mode: writes to localStorage localDB.
+export async function createTask(payload) {
+  const ts = now()
+  const jobData = {
+    title:               payload.title,
+    description:         payload.description         || null,
+    status:              payload.status              || 'pending',
+    priority:            payload.priority            || 'normal',
+    assigned_driver:     payload.assigned_driver     || payload.driver_id || null,
+    assigned_driver_name:payload.assigned_driver_name || payload.driver_name || null,
+    assigned_at:         payload.assigned_driver ? ts : null,
+    vehicle_id:          payload.vehicle_id          || null,
+    vehicle_reg:         payload.vehicle_reg         || null,
+    driver_name:         payload.driver_name         || null,
+    stops:               payload.stops               || null,
+    waypoints:           payload.waypoints           || null,
+    pickup_address:      payload.pickup_address      || payload.origin || null,
+    dropoff_address:     payload.dropoff_address     || payload.destination || null,
+    cancel_reason:       null,
+    completion_notes:    null,
+    created_at:          ts,
+    updated_at:          ts,
+  }
+
+  if (isLiveMode()) {
+    const sb = getSupabaseClient()
+    const { data, error } = await sb
+      .from('tasks')
+      .insert(jobData)
+      .select()
+      .single()
+
+    if (error) {
+      console.error('[AP3X:Backend] createTask error:', error)
+      return { ok: false, error: error.message }
+    }
+
+    // If already assigned, update driver's current_task and log event
+    if (data.assigned_driver) {
+      await sb
+        .from('drivers')
+        .update({ current_task: data.id, updated_at: ts })
+        .eq('id', data.assigned_driver)
+    }
+
+    await _logDashboardEvent('task_created', {
+      task_id:     data.id,
+      title:       data.title,
+      driver_id:   data.assigned_driver,
+      driver_name: data.assigned_driver_name,
+      priority:    data.priority,
+    })
+
+    console.info('[AP3X:Backend] Task created in Supabase:', data.id, '→', data.title)
+    return { ok: true, data }
+  }
+
+  // Local fallback
+  try {
+    const created = jobTable.create({ ...jobData, id: undefined })
+    return { ok: true, data: created }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+}
+
 export async function updateTask(taskId, updates) {
   if (isLiveMode()) {
     const sb = getSupabaseClient()

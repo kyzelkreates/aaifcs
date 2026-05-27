@@ -12,7 +12,7 @@
 
 import { jobTable, subscribe, DB_KEYS } from './services_local_localDB'
 import {
-  getTasks, updateTask, assignJobToDriver as backendAssignJob,
+  createTask, getTasks, updateTask, assignJobToDriver as backendAssignJob,
   subscribeToTasks, isLiveMode,
 } from './services_backend_backendService'
 import { getSupabaseSettings } from './services_supabase_supabaseClient'
@@ -77,13 +77,39 @@ export const dispatchService = {
     return jobTable.get(id)
   },
 
-  createJob(payload) {
-    // Always create locally first (optimistic); sync layer handles Supabase write
-    return jobTable.create({
-      status:     JOB_STATUS.PENDING,
-      priority:   JOB_PRIORITY.NORMAL,
-      created_at: new Date().toISOString(),
+  /**
+   * Create a job and write it to Supabase immediately.
+   * In live mode: inserts into Supabase → Realtime pushes to
+   * any Driver PWA subscribed for that driver instantly.
+   * In local mode: writes to localStorage (same-device only).
+   * Returns a Promise in both modes.
+   */
+  async createJob(payload) {
+    const base = {
+      status:   JOB_STATUS.PENDING,
+      priority: JOB_PRIORITY.NORMAL,
       ...payload,
+    }
+
+    if (_liveMode()) {
+      const result = await createTask(base)
+      if (!result.ok) {
+        console.error('[AP3X:Dispatch] createJob failed:', result.error)
+        // Optimistic local fallback so UI isn't blocked
+        const localJob = jobTable.create({ ...base, created_at: new Date().toISOString() })
+        return localJob
+      }
+      // Mirror in local DB for offline fallback
+      try {
+        jobTable.create({ ...result.data, _synced: true })
+      } catch {}
+      return result.data
+    }
+
+    // Local-only mode
+    return jobTable.create({
+      ...base,
+      created_at: new Date().toISOString(),
     })
   },
 

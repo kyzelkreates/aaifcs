@@ -638,9 +638,15 @@ function JobModal({ onClose, onSaved, vehicles, drivers }) {
       stop_count:    stopsPayload.length,
     }
 
-    dispatchService.createJob(job)
-    setSaving(false)
-    onSaved?.(); onClose?.()
+    try {
+      await dispatchService.createJob(job)
+      setSaving(false)
+      onSaved?.(); onClose?.()
+    } catch (err) {
+      console.error('[AP3X:Dispatch] createJob threw:', err)
+      setError('Failed to create job — please try again')
+      setSaving(false)
+    }
   }
 
   const allGeocoded = stops.filter(s => s.address.trim()).every(s => s.geocoded)
@@ -961,14 +967,14 @@ export default function Dispatch() {
     return () => { unsub?.(); unsubTel?.() }
   }, [load])
 
-  const handleComplete = (id) => {
-    dispatchService.completeJob(id)
+  const handleComplete = async (id) => {
+    await dispatchService.completeJob(id)
     load()
   }
 
-  const handleCancel = (id) => {
+  const handleCancel = async (id) => {
     if (!confirm('Cancel this job?')) return
-    dispatchService.cancelJob(id, 'Cancelled by operator')
+    await dispatchService.cancelJob(id, 'Cancelled by operator')
     load()
   }
 
