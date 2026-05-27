@@ -118,3 +118,63 @@ ALTER PUBLICATION supabase_realtime ADD TABLE public.dashboard_events;
 --   ('Alex Rivera', 'idle', true),
 --   ('Priya Sharma', 'driving', true),
 --   ('Marcus Chen', 'offline', false);
+
+-- ============================================================
+-- PWA JOB SYNC — Schema additions (run after initial schema)
+-- ============================================================
+
+-- ─── tasks: extra columns for full PWA job lifecycle ─────────
+ALTER TABLE public.tasks
+  ADD COLUMN IF NOT EXISTS accepted_at        TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS started_at         TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS cancelled_at       TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS cancel_reason      TEXT,
+  ADD COLUMN IF NOT EXISTS completion_notes   TEXT,
+  ADD COLUMN IF NOT EXISTS stops              JSONB,
+  ADD COLUMN IF NOT EXISTS waypoints          JSONB,
+  ADD COLUMN IF NOT EXISTS pickup_address     TEXT,
+  ADD COLUMN IF NOT EXISTS dropoff_address    TEXT,
+  ADD COLUMN IF NOT EXISTS vehicle_id         UUID,
+  ADD COLUMN IF NOT EXISTS vehicle_reg        TEXT,
+  ADD COLUMN IF NOT EXISTS driver_name        TEXT;
+
+-- ─── push_subscriptions: store driver PWA Web Push endpoints ─
+-- Each driver device registers here so the backend can push
+-- job notifications directly to their phone even when the
+-- PWA tab is closed.
+CREATE TABLE IF NOT EXISTS public.push_subscriptions (
+  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  driver_id   UUID NOT NULL REFERENCES public.drivers(id) ON DELETE CASCADE,
+  endpoint    TEXT NOT NULL UNIQUE,
+  p256dh      TEXT NOT NULL,   -- public key
+  auth        TEXT NOT NULL,   -- auth secret
+  device_name TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_seen   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_push_subs_driver ON public.push_subscriptions(driver_id);
+
+ALTER TABLE public.push_subscriptions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Public read push_subscriptions"  ON public.push_subscriptions FOR SELECT USING (true);
+CREATE POLICY "Public write push_subscriptions" ON public.push_subscriptions FOR ALL    USING (true);
+
+-- ─── driver_locations: real-time GPS store per driver ─────────
+-- Replaces localStorage-only GPS — fleet dashboard reads this.
+CREATE TABLE IF NOT EXISTS public.driver_locations (
+  driver_id   UUID PRIMARY KEY REFERENCES public.drivers(id) ON DELETE CASCADE,
+  lat         DOUBLE PRECISION,
+  lng         DOUBLE PRECISION,
+  speed       DOUBLE PRECISION DEFAULT 0,
+  heading     DOUBLE PRECISION DEFAULT 0,
+  accuracy    DOUBLE PRECISION,
+  status      TEXT DEFAULT 'offline',
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE public.driver_locations ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Public read driver_locations"  ON public.driver_locations FOR SELECT USING (true);
+CREATE POLICY "Public write driver_locations" ON public.driver_locations FOR ALL    USING (true);
+
+ALTER PUBLICATION supabase_realtime ADD TABLE public.driver_locations;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.push_subscriptions;

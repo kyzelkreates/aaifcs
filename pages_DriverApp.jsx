@@ -51,6 +51,7 @@ import {
 } from './services_sync_liveSync'
 import { dispatchService } from './services_dispatch_dispatchService'
 import { recoverOfflineTasks, onConnectionStatus, getConnectionStatus } from './services_backend_backendService'
+import { pwaJobSync, PWA_JOB_STATUS } from './services_pwa_jobSyncService'
 import { getSupabaseSettings } from './services_supabase_supabaseClient'
 import { DriverConnectionRow } from './components_ui_ConnectionStatus'
 
@@ -937,61 +938,78 @@ function DriverAppMain({ profile, onLogout }) {
     return unsub
   }, [])
 
-  // ── Refresh jobs: local storage + live Supabase subscription ──
+  // ── PWA Job Sync — Supabase Realtime (cross-device job delivery) ──────
   useEffect(() => {
-    // Local storage listener (same-device tab sync)
-    const onStorage = () => setJobs(loadJobs(profile.id))
-    window.addEventListener('storage', onStorage)
+    if (!profile?.id) return
 
-    // Live Supabase subscription for Driver PWA job assignment
-    const sbSettings = getSupabaseSettings()
-    let unsubLive = () => {}
+    // Init the PWA job sync service — fetches jobs + subscribes to realtime
+    pwaJobSync.init(profile.id)
 
-    if (sbSettings.enabled) {
-      unsubLive = dispatchService.subscribeToDriverJobs(profile.id, (liveTasks) => {
-        // liveTasks is the refreshed array from backend
-        const tasks = Array.isArray(liveTasks) ? liveTasks : []
-        if (tasks.length > 0) {
-          setJobs(tasks)
-          // Find newly assigned tasks (assigned in last 30 seconds)
-          const thirtySecsAgo = new Date(Date.now() - 30000).toISOString()
-          const newlyAssigned = tasks.find(t =>
-            t.status === 'assigned' &&
-            t.assigned_at && t.assigned_at > thirtySecsAgo
-          )
-          if (newlyAssigned) {
-            setNewJobBanner(newlyAssigned)
-            setTimeout(() => setNewJobBanner(null), 8000)
-          }
-        }
-      })
+    // Request notification permission so drivers get push alerts for new jobs
+    pwaJobSync.requestNotificationPermission()
+
+    // Subscribe to job list updates (fires on any realtime change)
+    const unsubJobs = pwaJobSync.onJobs((liveTasks) => {
+      setJobs(liveTasks)
+
+      // Show banner for newly assigned jobs (assigned in last 30s)
+      const thirtySecsAgo = new Date(Date.now() - 30000).toISOString()
+      const newlyAssigned = liveTasks.find(t =>
+        t.status === 'assigned' &&
+        t.assigned_at && t.assigned_at > thirtySecsAgo
+      )
+      if (newlyAssigned) {
+        setNewJobBanner(newlyAssigned)
+        setTimeout(() => setNewJobBanner(null), 8000)
+      }
+    })
+
+    // Subscribe to connection status changes (connected/offline/error)
+    const unsubStatus = pwaJobSync.onStatus((status) => {
+      setBackendStatus(
+        status === 'connected' ? 'connected' :
+        status === 'offline'   ? 'offline'   :
+        status === 'error'     ? 'failed'    : 'connecting'
+      )
+    })
+
+    // Register service worker background sync (flushes offline queue when network returns)
+    if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+      navigator.serviceWorker.controller.postMessage({ type: 'REGISTER_SYNC' })
     }
 
-    // Connection status listener
-    const unsubStatus = onConnectionStatus(setBackendStatus)
-
-    // Offline recovery on reconnect
-    let wasOffline = false
-    const handleOnline = async () => {
-      if (wasOffline) {
-        wasOffline = false
-        const { ok, tasks } = await recoverOfflineTasks(profile.id, offlinePending)
-        if (ok && tasks.length > 0) {
-          setJobs(tasks)
-          setOfflinePending([])
+    // Listen for SW messages (background sync flush, notification actions)
+    const handleSWMessage = (event) => {
+      if (event.data?.type === 'FLUSH_OFFLINE_QUEUE') {
+        // SW triggered — pwaJobSync will handle internally on next init
+        pwaJobSync.init(profile.id)
+      }
+      if (event.data?.type === 'NOTIFICATION_ACTION') {
+        const { action, jobId } = event.data
+        if (action === 'accept' && jobId) {
+          pwaJobSync.acceptJob(jobId)
+        }
+        if (action === 'view') {
+          setTab('jobs')
         }
       }
     }
-    const handleOffline = () => { wasOffline = true }
-    window.addEventListener('online', handleOnline)
-    window.addEventListener('offline', handleOffline)
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('message', handleSWMessage)
+    }
+
+    // Also keep the legacy connection status listener alive for ConnectionStatus component
+    const unsubConnStatus = onConnectionStatus(setBackendStatus)
 
     return () => {
-      window.removeEventListener('storage', onStorage)
-      window.removeEventListener('online', handleOnline)
-      window.removeEventListener('offline', handleOffline)
-      unsubLive()
+      unsubJobs()
       unsubStatus()
+      unsubConnStatus()
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.removeEventListener('message', handleSWMessage)
+      }
+      // Don't call pwaJobSync.destroy() here — we want it alive across re-renders.
+      // It will destroy itself when the user logs out.
     }
   }, [profile.id])
 
@@ -1283,7 +1301,7 @@ function DriverAppMain({ profile, onLogout }) {
     setActiveJob(job)
     setJobStops([])
     setStopRoutes([])
-    updateJobStatus(job.id, 'in_progress', profile.id)
+    pwaJobSync.startJob(job.id)
     setTab('map')
     // ── Apex CC bridge: route started ──────────────────────────
     try { apexBridgeRef.current?.onJobStart?.(job) } catch {}
@@ -1379,7 +1397,7 @@ function DriverAppMain({ profile, onLogout }) {
   }, [pos, fetchRoute, geocodeAddr, profile.id])
 
   const completeJob = useCallback((job) => {
-    updateJobStatus(job.id, 'completed', profile.id)
+    pwaJobSync.completeJob(job.id)
     setJobs(prev => prev.filter(j => j.id !== job.id))
     if (activeJob?.id === job.id) {
       setActiveJob(null)
@@ -1993,7 +2011,7 @@ function DriverAppMain({ profile, onLogout }) {
 
           {/* Fleet connect + refresh row */}
           <div className="flex gap-2">
-            <button onClick={() => setJobs(loadJobs(profile.id))}
+            <button onClick={() => { pwaJobSync.init(profile.id) }}
               className="flex-1 flex items-center justify-center gap-2 py-2 rounded-xl border border-slate-800/60 text-slate-600 hover:text-slate-400 hover:border-slate-700 text-xs transition-colors">
               <Icon name="RefreshCw" size={11} />
               Refresh
