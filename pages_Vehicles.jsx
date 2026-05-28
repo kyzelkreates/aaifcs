@@ -245,7 +245,7 @@ export default function Vehicles() {
   const { vehicles, isLoading } = useFleetStore(s => ({ vehicles: s.vehicles, isLoading: s.isLoading }))
   const [modal, setModal] = useState(null)
 
-  useEffect(() => { fleetService.fetchVehicles() }, [])
+  useEffect(() => { (async () => { await fleetService.fetchVehicles() })() }, [])
 
   const selected = vehicleId ? vehicles.find(v => v.id === vehicleId) || null : null
 
@@ -277,7 +277,7 @@ export default function Vehicles() {
       </div>
 
       {modal && (
-        <VehicleModal vehicle={modal} onClose={() => setModal(null)} onSaved={() => { fleetService.fetchVehicles(); setModal(null) }} />
+        <VehicleModal vehicle={modal} onClose={() => setModal(null)} onSaved={async () => { await fleetService.fetchVehicles(); setModal(null) }} />
       )}
     </div>
   )

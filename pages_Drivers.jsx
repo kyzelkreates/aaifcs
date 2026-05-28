@@ -27,7 +27,7 @@ export default function Drivers() {
   const [search, setSearch]   = useState('')
   const [modal,  setModal]    = useState(null)
 
-  const load = useCallback(() => driverService.fetchDrivers({ status: statusFilter }), [statusFilter])
+  const load = useCallback(async () => await driverService.fetchDrivers({ status: statusFilter }), [statusFilter])
   useEffect(() => { load() }, [load])
 
   const filtered = drivers.filter(d => {

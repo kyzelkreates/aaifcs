@@ -623,3 +623,107 @@ export async function recoverOfflineTasks(driverId, pendingLocalUpdates = []) {
 
   return { ok: true, tasks: tasks || [] }
 }
+
+
+// ═══════════════════════════════════════════════════════════════
+// FLEET NODES  (contract: tables + realtime subscription)
+// ═══════════════════════════════════════════════════════════════
+
+export async function getFleetNodesList() {
+  if (isLiveMode()) {
+    const sb = getSupabaseClient()
+    const { data, error } = await sb
+      .from('fleet_nodes')
+      .select('*')
+      .order('node_name', { ascending: true })
+    if (error) { console.error('[AP3X:Backend] getFleetNodesList:', error); return [] }
+    return data || []
+  }
+  return vehicleTable.list()
+}
+
+export async function upsertFleetNode(nodeData) {
+  if (!isLiveMode()) return { ok: false, error: 'offline' }
+  const sb = getSupabaseClient()
+  const { data, error } = await sb
+    .from('fleet_nodes')
+    .upsert({ ...nodeData, updated_at: now() }, { onConflict: 'id' })
+    .select()
+    .single()
+  if (error) { console.error('[AP3X:Backend] upsertFleetNode:', error); return { ok: false, error: error.message } }
+  return { ok: true, data }
+}
+
+export function subscribeToFleetNodes(callback) {
+  if (!isLiveMode()) {
+    return localSubscribe(DB_KEYS.VEHICLES, () => getFleetNodesList().then(callback))
+  }
+  const sb = getSupabaseClient()
+  if (!sb) return () => {}
+  const channel = sb
+    .channel('ap3x-fleet-nodes')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'fleet_nodes' },
+      () => getFleetNodesList().then(callback)
+    )
+    .subscribe(s => {
+      if (s === 'SUBSCRIBED')    setStatus('connected')
+      if (s === 'CHANNEL_ERROR') setStatus('sync_delayed')
+    })
+  registerChannel('fleet_nodes', channel)
+  return () => { try { sb.removeChannel(channel) } catch {} _channels.delete('fleet_nodes') }
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// DASHBOARD EVENTS  (audit log)
+// ═══════════════════════════════════════════════════════════════
+
+export async function logDashboardEvent(type, payload) {
+  if (!isLiveMode()) return
+  const sb = getSupabaseClient()
+  try {
+    await sb.from('dashboard_events').insert({ type, payload, created_at: now() })
+  } catch (e) {
+    console.warn('[AP3X:Backend] dashboard_events insert failed (non-fatal):', e.message)
+  }
+}
+
+export async function getDashboardEvents(limit = 50) {
+  if (!isLiveMode()) return []
+  const sb = getSupabaseClient()
+  const { data, error } = await sb
+    .from('dashboard_events')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(limit)
+  if (error) { console.error('[AP3X:Backend] getDashboardEvents:', error); return [] }
+  return data || []
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// SETTINGS  (fleet-wide operator settings — Supabase backed)
+// ═══════════════════════════════════════════════════════════════
+
+export async function getSettings(key = null) {
+  if (!isLiveMode()) return key ? null : {}
+  const sb = getSupabaseClient()
+  let query = sb.from('settings').select('*')
+  if (key) query = query.eq('key', key).single()
+  const { data, error } = await query
+  if (error) { console.debug('[AP3X:Backend] getSettings:', error.message); return key ? null : {} }
+  if (key) return data?.value ?? null
+  return (data || []).reduce((acc, row) => { acc[row.key] = row.value; return acc }, {})
+}
+
+export async function setSetting(key, value) {
+  if (!isLiveMode()) return { ok: false, error: 'offline' }
+  const sb = getSupabaseClient()
+  const { data, error } = await sb
+    .from('settings')
+    .upsert({ key, value, updated_at: now() }, { onConflict: 'key' })
+    .select()
+    .single()
+  if (error) { console.error('[AP3X:Backend] setSetting:', error); return { ok: false, error: error.message } }
+  return { ok: true, data }
+}

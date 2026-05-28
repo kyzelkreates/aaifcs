@@ -1,28 +1,28 @@
 /**
  * ============================================================
  * AP3X — Dispatch Service  (Fleet Control OS)
- * services/dispatch/dispatchService.js
  *
  * CONTRACT (LOCKED):
  *   - Supabase is the ONLY source of truth
  *   - No local state overrides backend
  *   - Tables: tasks · job_assignments · drivers · vehicles
- *   - Realtime subscriptions: tasks · job_assignments
- *   - Dispatcher role only: create tasks, assign tasks, monitor
+ *             fleet_nodes · dashboard_events
+ *   - Realtime: tasks · job_assignments · fleet_nodes
+ *   - Dispatcher role only: create, assign, monitor
  *
- * Task lifecycle:
+ * Task lifecycle (strict — no reinterpretation):
  *   pending → assigned → accepted → in_progress → completed → cancelled
  * ============================================================
  */
 
 import {
   createTask, getTasks, updateTask, assignTask,
-  subscribeToTasks, subscribeToJobAssignments,
-  getJobAssignments, isLiveMode,
+  subscribeToTasks, subscribeToJobAssignments, subscribeToFleetNodes,
+  getJobAssignments, logDashboardEvent, isLiveMode,
 } from './services_backend_backendService'
-import { jobTable, subscribe as localSubscribe, DB_KEYS } from './services_local_localDB'
+import { jobTable } from './services_local_localDB'
 
-// ─── Task status constants (contract-locked) ──────────────────
+// ─── Contract-locked status constants ────────────────────────
 export const JOB_STATUS = {
   PENDING:     'pending',
   ASSIGNED:    'assigned',
@@ -53,83 +53,80 @@ export const PRIORITY_COLORS = {
 
 export const dispatchService = {
 
-  // ─── READ ──────────────────────────────────────────────────
+  // ─── READ ─────────────────────────────────────────────────
 
-  /**
-   * Fetch tasks from Supabase.
-   * Optional filters: { status, assigned_driver }
-   */
   async fetchJobs(filters = {}) {
     return getTasks(filters)
   },
 
   getJob(id) {
-    // Local read only (for optimistic UI in offline mode)
     return jobTable.get?.(id) || null
   },
 
-  // ─── CREATE ────────────────────────────────────────────────
+  // ─── CREATE ───────────────────────────────────────────────
 
   /**
-   * Create a new task.
-   * Inserts into `tasks` with status = 'pending'.
-   * If driver/vehicle provided at creation time, also calls assignTask.
-   * Supabase Realtime fires → Driver PWA receives it.
+   * Step 0 of dispatch flow.
+   * Inserts into tasks (status = 'pending') via Supabase.
+   * Supabase Realtime → Driver PWA instantly.
    */
   async createJob(payload) {
     const result = await createTask({
       title:           payload.title,
-      description:     payload.description    || null,
-      priority:        payload.priority       || JOB_PRIORITY.NORMAL,
-      stops:           payload.stops          || null,
-      waypoints:       payload.waypoints      || null,
-      pickup_address:  payload.pickup_address || payload.origin       || null,
+      description:     payload.description     || null,
+      priority:        payload.priority        || JOB_PRIORITY.NORMAL,
+      stops:           payload.stops           || null,
+      waypoints:       payload.waypoints       || null,
+      pickup_address:  payload.pickup_address  || payload.origin      || null,
       dropoff_address: payload.dropoff_address || payload.destination || null,
-      vehicle_id:      payload.vehicle_id     || null,
-      vehicle_reg:     payload.vehicle_reg    || null,
+      vehicle_id:      payload.vehicle_id      || null,
+      vehicle_reg:     payload.vehicle_reg     || null,
     })
 
     if (!result.ok) {
-      console.error('[AP3X:Dispatch] createJob failed:', result.error)
-      // Offline fallback — local only until reconnection
       if (!isLiveMode()) {
-        return jobTable.create({
-          ...payload,
-          status:     JOB_STATUS.PENDING,
-          created_at: new Date().toISOString(),
-        })
+        return jobTable.create({ ...payload, status: JOB_STATUS.PENDING, created_at: new Date().toISOString() })
       }
       throw new Error(result.error)
     }
 
-    // If already assigned at creation time, wire the assignment
+    logDashboardEvent('task_created', {
+      task_id: result.data.id, title: result.data.title, priority: result.data.priority,
+    }).catch(() => {})
+
+    // If driver was supplied at creation time, assign immediately
     if (payload.assigned_driver || payload.driver_id) {
-      const driverId  = payload.assigned_driver || payload.driver_id
-      const vehicleId = payload.vehicle_id || null
-      const driverName = payload.assigned_driver_name || payload.driver_name || ''
-      const vehicleReg = payload.vehicle_reg || ''
-      await assignTask(result.data.id, driverId, vehicleId, driverName, vehicleReg)
+      await assignTask(
+        result.data.id,
+        payload.assigned_driver || payload.driver_id,
+        payload.vehicle_id  || null,
+        payload.assigned_driver_name || payload.driver_name || '',
+        payload.vehicle_reg || '',
+      )
     }
 
     return result.data
   },
 
-  // ─── ASSIGN ────────────────────────────────────────────────
+  // ─── ASSIGN  (dispatch flow step 1) ──────────────────────
 
   /**
-   * Assign an existing task to a driver.
-   * Writes to job_assignments + updates tasks.
-   * Supabase Realtime propagates to Driver PWA immediately.
+   * Assigns task → writes job_assignments + tasks.assigned_driver.
+   * tasks.status → 'assigned'.
+   * Supabase Realtime → Driver PWA within ~200 ms.
    */
   async assignJob(taskId, driverId, vehicleId, driverName, vehicleReg) {
-    const result = await assignTask(taskId, driverId, vehicleId, driverName, vehicleReg)
+    const result = await assignTask(taskId, driverId, vehicleId || null, driverName || '', vehicleReg || '')
     if (!result.ok && !result.duplicate) throw new Error(result.error)
+
+    logDashboardEvent('task_assigned', {
+      task_id: taskId, driver_id: driverId, driver_name: driverName,
+    }).catch(() => {})
+
     return result.data
   },
 
-  // ─── LIFECYCLE UPDATES ─────────────────────────────────────
-  // All status transitions go through updateTask → Supabase.
-  // Backend state is always the authority.
+  // ─── LIFECYCLE UPDATES ────────────────────────────────────
 
   async updateJob(taskId, patch) {
     const result = await updateTask(taskId, patch)
@@ -138,60 +135,52 @@ export const dispatchService = {
   },
 
   async completeJob(taskId, notes = '') {
-    return this.updateJob(taskId, {
+    const data = await this.updateJob(taskId, {
       status:           JOB_STATUS.COMPLETED,
       completed_at:     new Date().toISOString(),
       completion_notes: notes || null,
     })
+    logDashboardEvent('task_completed', { task_id: taskId }).catch(() => {})
+    return data
   },
 
   async cancelJob(taskId, reason = '') {
-    return this.updateJob(taskId, {
+    const data = await this.updateJob(taskId, {
       status:        JOB_STATUS.CANCELLED,
       cancel_reason: reason || null,
       cancelled_at:  new Date().toISOString(),
     })
+    logDashboardEvent('task_cancelled', { task_id: taskId, reason }).catch(() => {})
+    return data
   },
 
   async startJob(taskId) {
-    return this.updateJob(taskId, {
-      status:     JOB_STATUS.IN_PROGRESS,
-      started_at: new Date().toISOString(),
-    })
+    return this.updateJob(taskId, { status: JOB_STATUS.IN_PROGRESS, started_at: new Date().toISOString() })
   },
 
   deleteJob(taskId) {
-    // Soft delete — mark cancelled rather than hard delete
     return this.cancelJob(taskId, 'Deleted by dispatcher')
   },
 
-  // ─── SUBSCRIPTIONS ─────────────────────────────────────────
+  // ─── SUBSCRIPTIONS ───────────────────────────────────────
+  // Contract: tasks · job_assignments · fleet_nodes
 
-  /**
-   * Subscribe to all task changes (fleet dispatch view).
-   * Fires callback with latest tasks array on any change.
-   */
   subscribeToJobs(callback) {
     return subscribeToTasks(callback)
   },
 
-  /**
-   * Subscribe to job_assignment changes (dispatcher audit view).
-   * Fires callback with latest assignments array on any change.
-   */
   subscribeToAssignments(callback) {
     return subscribeToJobAssignments(callback)
   },
 
-  /**
-   * Subscribe to tasks for a specific driver (Driver PWA use).
-   * Filtered subscription — only fires for that driver's tasks.
-   */
+  /** Contract: realtime on fleet_nodes */
+  subscribeToFleet(callback) {
+    return subscribeToFleetNodes(callback)
+  },
+
   subscribeToDriverJobs(driverId, callback) {
     return subscribeToTasks(callback, driverId)
   },
-
-  // ─── JOB ASSIGNMENTS (audit log) ───────────────────────────
 
   async getAssignmentsForTask(taskId) {
     return getJobAssignments(taskId)

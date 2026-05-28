@@ -966,10 +966,10 @@ export default function Analytics() {
   const [alerts,        setAlerts]       = useState([])
 
   // ── Load all real data ──────────────────────────────────────
-  const load = useCallback(() => {
+  const load = useCallback(async () => {
     setLoading(true)
-    try { fleetService.fetchVehicles()  } catch {}
-    try { driverService.fetchDrivers()  } catch {}
+    try { await fleetService.fetchVehicles()  } catch {}
+    try { await driverService.fetchDrivers()  } catch {}
 
     // Telemetry rows
     try {

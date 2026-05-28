@@ -1066,11 +1066,13 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true)
   const mapRef = useRef(null)
 
-  const load = useCallback(() => {
+  const load = useCallback(async () => {
     setLoading(true)
     try {
-      fleetService.fetchVehicles()
-      driverService.fetchDrivers()
+      await Promise.all([
+        fleetService.fetchVehicles(),
+        driverService.fetchDrivers(),
+      ])
       const fresh = safetyService.fetchAlerts({ resolved: false })
       setAlerts(Array.isArray(fresh) ? fresh : [])
     } catch (err) {

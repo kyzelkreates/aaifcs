@@ -36,8 +36,8 @@ export default function Fleet() {
   const [modal,        setModal]        = useState(null)  // null | 'create' | vehicle
   const [deleteTarget, setDeleteTarget] = useState(null)
 
-  const load = useCallback(() => {
-    fleetService.fetchVehicles({ status: statusFilter, search: search || undefined })
+  const load = useCallback(async () => {
+    await fleetService.fetchVehicles({ status: statusFilter, search: search || undefined })
   }, [statusFilter, search])
 
   useEffect(() => { load() }, [load])
