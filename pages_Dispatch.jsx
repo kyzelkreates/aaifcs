@@ -12,9 +12,7 @@ import Icon from './components_ui_Icon'
 import Badge from './components_ui_Badge'
 import StatusDot from './components_ui_StatusDot'
 import { dispatchService, JOB_STATUS, JOB_PRIORITY, STATUS_COLORS, PRIORITY_COLORS } from './services_dispatch_dispatchService'
-import { useFleetStore, useDriverStore } from './core_storage'
-import { fleetService } from './services_fleet_fleetService'
-import { driverService } from './services_drivers_driverService'
+import { getDrivers, getVehicles, subscribeToDrivers } from './services_backend_backendService'
 import {
   getQRCodeURL, sendViaEmail, sendViaShare, copyToClipboard,
   connectBluetooth, sendViaBluetooth, bluetoothConnected, disconnectBluetooth,
@@ -388,7 +386,7 @@ function AssignModal({ job, drivers, vehicles, onClose, onSaved }) {
       const vehicle = vehicles.find(v => v.id === vehicleId)
       await dispatchService.assignJob(
         job.id, driverId, vehicleId,
-        driver?.full_name || driver?.name, vehicle?.reg_number
+        driver?.full_name || driver?.name || '', vehicle?.reg_number || ''
       )
       onSaved?.(); onClose?.()
     } catch (err) {
@@ -411,7 +409,7 @@ function AssignModal({ job, drivers, vehicles, onClose, onSaved }) {
             <label className="text-xs text-slate-400">Driver</label>
             <select value={driverId} onChange={e => setDriverId(e.target.value)} required className="apex-input w-full">
               <option value="">Select driver…</option>
-              {drivers.map(d => <option key={d.id} value={d.id}>{d.full_name}</option>)}
+              {drivers.map(d => <option key={d.id} value={d.id}>{d.full_name || d.name}</option>)}
             </select>
           </div>
           <div className="space-y-1.5">
@@ -611,7 +609,7 @@ function JobModal({ onClose, onSaved, vehicles, drivers }) {
 
     const job = {
       ...form,
-      driver_name:  driver?.full_name  || '',
+      driver_name:  driver?.full_name || driver?.name || '',
       vehicle_reg:  vehicle?.reg_number || '',
       // Vehicle profile — full dimensions for routing
       vehicle_profile: vehicle ? {
@@ -709,7 +707,7 @@ function JobModal({ onClose, onSaved, vehicles, drivers }) {
               <label className="text-xs text-slate-400 font-medium">Assign Driver</label>
               <select className="apex-input w-full" value={form.driver_id} onChange={e => set('driver_id', e.target.value)}>
                 <option value="">— Unassigned —</option>
-                {drivers.map(d => <option key={d.id} value={d.id}>{d.full_name}</option>)}
+                {drivers.map(d => <option key={d.id} value={d.id}>{d.full_name || d.name}</option>)}
               </select>
             </div>
             <div className="space-y-1.5">
@@ -932,8 +930,8 @@ function JobModal({ onClose, onSaved, vehicles, drivers }) {
 
 // ─── Dispatch Page ────────────────────────────────────────────
 export default function Dispatch() {
-  const { vehicles } = useFleetStore(s => ({ vehicles: s.vehicles }))
-  const { drivers }  = useDriverStore(s => ({ drivers: s.drivers }))
+  const [drivers,    setDrivers]   = useState([])
+  const [vehicles,   setVehicles]  = useState([])
   const [jobs,       setJobs]      = useState([])
   const [loading,    setLoading]   = useState(false)
   const [createModal, setCreate]   = useState(false)
@@ -955,17 +953,28 @@ export default function Dispatch() {
     }
   }, [])
 
+  // Load drivers + vehicles from Supabase on mount
+  const loadDriversAndVehicles = useCallback(async () => {
+    const [driversData, vehiclesData] = await Promise.all([
+      getDrivers(),
+      getVehicles(),
+    ])
+    setDrivers(Array.isArray(driversData) ? driversData : [])
+    setVehicles(Array.isArray(vehiclesData) ? vehiclesData : [])
+  }, [])
+
   useEffect(() => {
     load()
-    fleetService.fetchVehicles()
-    driverService.fetchDrivers()
+    loadDriversAndVehicles()
     const unsub = dispatchService.subscribeToJobs(() => load())
+    // Refresh drivers list when driver status changes
+    const unsubDrivers = subscribeToDrivers(() => loadDriversAndVehicles())
     // Listen for incoming driver telemetry
     const unsubTel = listenForDriverTelemetry((pkg) => {
       setTelEvents(prev => [{ ...pkg, ts: Date.now() }, ...prev].slice(0, 50))
     })
-    return () => { unsub?.(); unsubTel?.() }
-  }, [load])
+    return () => { unsub?.(); unsubDrivers?.(); unsubTel?.() }
+  }, [load, loadDriversAndVehicles])
 
   const handleComplete = async (id) => {
     await dispatchService.completeJob(id)
