@@ -190,32 +190,8 @@ function loadMsgs() {
   try { return JSON.parse(localStorage.getItem(MSGS_KEY) || '[]').reverse() } catch { return [] }
 }
 
-// ── Load jobs for this driver ─────────────────────────────────
-function loadJobs(driverId) {
-  try {
-    const all = JSON.parse(localStorage.getItem(JOBS_KEY) || '[]')
-    // Show jobs assigned to this driver OR unassigned pending jobs
-    return all.filter(j =>
-      j.driver_id === driverId ||
-      (!j.driver_id && (j.status === 'pending' || j.status === 'assigned'))
-    ).sort((a, b) => {
-      const pri = { urgent: 0, high: 1, normal: 2, low: 3 }
-      return (pri[a.priority] ?? 2) - (pri[b.priority] ?? 2)
-    }).slice(0, 20)
-  } catch { return [] }
-}
-
-// ── Persist job status update back to store ───────────────────
-function updateJobStatus(jobId, status, driverId) {
-  try {
-    const all = JSON.parse(localStorage.getItem(JOBS_KEY) || '[]')
-    const idx = all.findIndex(j => j.id === jobId)
-    if (idx !== -1) {
-      all[idx] = { ...all[idx], status, driver_id: driverId, updated_at: tsNow() }
-      localStorage.setItem(JOBS_KEY, JSON.stringify(all))
-    }
-  } catch {}
-}
+// ── Jobs loaded from Supabase via pwaJobSync (no localStorage) ──
+// Legacy loadJobs removed — pwaJobSync.init(driverId) is the SSOT.
 
 // ══════════════════════════════════════════════════════════════
 //  MAP FOLLOW CONTROL
@@ -712,7 +688,7 @@ function DriverAppMain({ profile, onLogout }) {
   const alertTimerRef = useRef(null)
 
   // ── Jobs state ───────────────────────────────────────────────
-  const [jobs,       setJobs]      = useState(() => loadJobs(profile.id))
+  const [jobs,       setJobs]      = useState([])
   const [activeJob,  setActiveJob] = useState(null)
   const [newJobBanner, setNewJobBanner] = useState(null)   // {title} — shown when live job arrives
   const [offlinePending, setOfflinePending] = useState([]) // queued status updates during offline
@@ -825,7 +801,6 @@ function DriverAppMain({ profile, onLogout }) {
     setFleetLinkSuccess(true)
     setFleetLinkCode('')
     setTimeout(() => {
-      setJobs(loadJobs(profile.id))
       setShowFleetConnect(false)
       setFleetLinkSuccess(false)
     }, 2500)
@@ -893,9 +868,9 @@ function DriverAppMain({ profile, onLogout }) {
         ts: tsNow(),
       }
       try { pushTelemetryToFleet(profile.id, pkg) } catch {}
-      // ── Live sync bridge — pushes to fleet map ──────────────
+      // ── Push GPS to Supabase driver_locations (cross-device fleet map) ──
       try {
-        pushDriverLocation(profile.id, profile.vehicle_id || profile.id, {
+        pwaJobSync.pushLocation({
           lat: pos[0], lng: pos[1], speed, heading, accuracy, status: 'en_route'
         })
       } catch {}

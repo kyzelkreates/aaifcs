@@ -1,68 +1,68 @@
 /**
  * ============================================================
- * AP3X — Centralized Backend Service Layer  (SSOT data access)
+ * AP3X — Backend Service Layer  (SSOT — Supabase Only)
  * services/backendService.js
  *
- * THE ONLY DATA ACCESS LAYER — no component calls Supabase directly.
+ * CONTRACT (LOCKED):
+ *   Tables:  profiles · tasks · drivers · vehicles · job_assignments · driver_locations
+ *   Realtime: tasks · job_assignments · driver_locations
+ *   No mock data. No local overrides. Backend wins on conflict.
  *
- * Live mode  → Supabase queries + realtime subscriptions
- * Local mode → localStorage via localDB (BroadcastChannel sync)
+ * Task lifecycle (strict state machine):
+ *   pending → assigned → accepted → in_progress → completed → cancelled
  *
- * On module load: auto-probes connection if settings.enabled === true.
+ * Roles:
+ *   profiles.role = 'dispatcher' | 'driver'
  * ============================================================
  */
 
-import { getSupabaseClient, isSupabaseReady, getSupabaseSettings, autoInitSupabase } from './services_supabase_supabaseClient'
-import { jobTable, driverTable, vehicleTable, telemetryTable, subscribe as localSubscribe, DB_KEYS } from './services_local_localDB'
+import {
+  getSupabaseClient, isSupabaseReady,
+  getSupabaseSettings, autoInitSupabase,
+} from './services_supabase_supabaseClient'
+import {
+  jobTable, driverTable, vehicleTable,
+  subscribe as localSubscribe, DB_KEYS,
+} from './services_local_localDB'
 
-// ─── Ensure client is initialized before any call ────────────
+// ─── Ensure Supabase client is ready on import ────────────────
 autoInitSupabase()
 
-// ─── Connection status event bus ──────────────────────────────
+// ─── Connection event bus ─────────────────────────────────────
 const _listeners = new Set()
+let _currentStatus = 'offline'
 
 export function onConnectionStatus(cb) {
   _listeners.add(cb)
-  // Immediately fire with current status so new subscribers get state now
   try { cb(_currentStatus) } catch {}
   return () => _listeners.delete(cb)
 }
 
-function emitStatus(status) {
-  _listeners.forEach(cb => { try { cb(status) } catch {} })
-}
-
-// Statuses: 'connected' | 'connecting' | 'offline' | 'invalid_config' | 'failed' | 'sync_delayed'
-let _currentStatus = 'offline'
-
 export function getConnectionStatus() { return _currentStatus }
 
-function setStatus(status) {
-  if (_currentStatus !== status) {
-    _currentStatus = status
-    console.debug('[AP3X:Backend] Status →', status)
-    emitStatus(status)
-  }
+function setStatus(s) {
+  if (_currentStatus === s) return
+  _currentStatus = s
+  console.debug('[AP3X:Backend] Status →', s)
+  _listeners.forEach(cb => { try { cb(s) } catch {} })
 }
 
 // ─── Mode check ───────────────────────────────────────────────
 export function isLiveMode() {
-  const settings = getSupabaseSettings()
-  return !!(settings.enabled && settings.url && settings.anonKey && isSupabaseReady())
+  const s = getSupabaseSettings()
+  return !!(s.enabled && s.url && s.anonKey && isSupabaseReady())
 }
 
-// ─── Timestamp helper ─────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────
 const now = () => new Date().toISOString()
 
-// ─── Realtime channel registry (prevents duplicates) ─────────
+// ─── Realtime channel registry ────────────────────────────────
 const _channels = new Map()
 
 function registerChannel(key, channel) {
+  const sb = getSupabaseClient()
   if (_channels.has(key)) {
-    try {
-      const sb = getSupabaseClient()
-      sb?.removeChannel(_channels.get(key))
-    } catch {}
+    try { sb?.removeChannel(_channels.get(key)) } catch {}
   }
   _channels.set(key, channel)
 }
@@ -70,94 +70,101 @@ function registerChannel(key, channel) {
 export function cleanupSubscriptions() {
   const sb = getSupabaseClient()
   if (!sb) return
-  _channels.forEach((ch) => { try { sb.removeChannel(ch) } catch {} })
+  _channels.forEach(ch => { try { sb.removeChannel(ch) } catch {} })
   _channels.clear()
 }
 
-// ─── Startup connection probe ─────────────────────────────────
-// Called automatically on module load and on demand.
-// Sets the status that ConnectionStatusPill reflects.
+// ─── Connection probe ─────────────────────────────────────────
 let _probeInFlight = false
 
 export async function probeConnection() {
   if (_probeInFlight) return _currentStatus === 'connected'
   _probeInFlight = true
 
-  const settings = getSupabaseSettings()
-
-  if (!settings.enabled) {
-    setStatus('offline')
-    _probeInFlight = false
-    return false
-  }
-
-  if (!settings.url || !settings.anonKey) {
-    setStatus('invalid_config')
-    console.warn('[AP3X:Backend] Supabase enabled but URL/key missing — check Settings → Backend')
-    _probeInFlight = false
-    return false
-  }
+  const s = getSupabaseSettings()
+  if (!s.enabled)         { setStatus('offline');         _probeInFlight = false; return false }
+  if (!s.url || !s.anonKey) { setStatus('invalid_config'); _probeInFlight = false; return false }
 
   const sb = getSupabaseClient()
-  if (!sb) {
-    setStatus('invalid_config')
-    _probeInFlight = false
-    return false
-  }
+  if (!sb) { setStatus('invalid_config'); _probeInFlight = false; return false }
 
   try {
     setStatus('connecting')
-    console.debug('[AP3X:Backend] Probing Supabase connection…')
-
-    // Try REST health endpoint first — fastest, no table needed
     try {
-      const res = await fetch(`${settings.url.trim()}/rest/v1/`, {
-        headers: {
-          apikey:        settings.anonKey.trim(),
-          Authorization: `Bearer ${settings.anonKey.trim()}`,
-        },
+      const res = await fetch(`${s.url.trim()}/rest/v1/`, {
+        headers: { apikey: s.anonKey.trim(), Authorization: `Bearer ${s.anonKey.trim()}` },
         signal: AbortSignal.timeout(6000),
       })
-      if (res.status > 0) {
-        setStatus('connected')
-        console.info('[AP3X:Backend] ✓ Connected via REST probe, status:', res.status)
-        _probeInFlight = false
-        return true
-      }
-    } catch (fetchErr) {
-      console.debug('[AP3X:Backend] REST probe failed, falling back to SDK:', fetchErr.message)
-    }
+      if (res.status > 0) { setStatus('connected'); _probeInFlight = false; return true }
+    } catch {}
 
-    // Fallback: SDK query
     const { error } = await sb.from('tasks').select('id').limit(1)
     const IGNORABLE = new Set(['PGRST116','PGRST301','42P01','42501','PGRST204'])
     if (!error || IGNORABLE.has(error.code) || IGNORABLE.has(String(error.status))) {
-      setStatus('connected')
-      console.info('[AP3X:Backend] ✓ Connected via SDK probe')
-      _probeInFlight = false
-      return true
+      setStatus('connected'); _probeInFlight = false; return true
     }
-
-    console.warn('[AP3X:Backend] SDK probe error:', error?.message, '| code:', error?.code)
-    setStatus('failed')
-    _probeInFlight = false
-    return false
+    setStatus('failed'); _probeInFlight = false; return false
   } catch (e) {
-    console.warn('[AP3X:Backend] Connection probe threw:', e.message)
-    setStatus('offline')
-    _probeInFlight = false
-    return false
+    setStatus('offline'); _probeInFlight = false; return false
   }
 }
 
-// ─── Auto-probe on startup if live mode is configured ─────────
 ;(function startupProbe() {
-  const settings = getSupabaseSettings()
-  if (settings.enabled && settings.url && settings.anonKey) {
-    // Small delay so module graph fully loads first
-    setTimeout(() => probeConnection(), 800)
-  }
+  const s = getSupabaseSettings()
+  if (s.enabled && s.url && s.anonKey) setTimeout(() => probeConnection(), 800)
 })()
+
+
+// ═══════════════════════════════════════════════════════════════
+// PROFILES  (role = 'dispatcher' | 'driver')
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Get a single profile by id.
+ * Used by driver PWA to verify identity against Supabase.
+ */
+export async function getProfile(profileId) {
+  if (!isLiveMode()) return null
+  const sb = getSupabaseClient()
+  const { data, error } = await sb
+    .from('profiles')
+    .select('*')
+    .eq('id', profileId)
+    .single()
+  if (error) { console.error('[AP3X:Backend] getProfile:', error); return null }
+  return data
+}
+
+/**
+ * Get all profiles with a given role.
+ */
+export async function getProfilesByRole(role) {
+  if (!isLiveMode()) return []
+  const sb = getSupabaseClient()
+  const { data, error } = await sb
+    .from('profiles')
+    .select('*')
+    .eq('role', role)
+    .order('full_name', { ascending: true })
+  if (error) { console.error('[AP3X:Backend] getProfilesByRole:', error); return [] }
+  return data || []
+}
+
+/**
+ * Upsert a profile row. Called when a driver first authenticates.
+ */
+export async function upsertProfile(profileData) {
+  if (!isLiveMode()) return { ok: false, error: 'offline' }
+  const sb = getSupabaseClient()
+  const { data, error } = await sb
+    .from('profiles')
+    .upsert({ ...profileData, updated_at: now() }, { onConflict: 'id' })
+    .select()
+    .single()
+  if (error) { console.error('[AP3X:Backend] upsertProfile:', error); return { ok: false, error: error.message } }
+  return { ok: true, data }
+}
+
 
 // ═══════════════════════════════════════════════════════════════
 // DRIVERS
@@ -171,12 +178,7 @@ export async function getDrivers() {
       .from('drivers')
       .select('*')
       .order('name', { ascending: true })
-
-    if (error) {
-      console.error('[AP3X:Backend] getDrivers error:', error)
-      setStatus('failed')
-      return []
-    }
+    if (error) { console.error('[AP3X:Backend] getDrivers:', error); setStatus('failed'); return [] }
     setStatus('connected')
     return data || []
   }
@@ -192,46 +194,68 @@ export async function updateDriverStatus(driverId, status, extra = {}) {
       .eq('id', driverId)
       .select()
       .single()
-
-    if (error) {
-      console.error('[AP3X:Backend] updateDriverStatus error:', error)
-      return { ok: false, error: error.message }
-    }
+    if (error) { console.error('[AP3X:Backend] updateDriverStatus:', error); return { ok: false, error: error.message } }
     return { ok: true, data }
   }
-  try {
-    const updated = driverTable.update(driverId, { status, ...extra })
-    return { ok: true, data: updated }
-  } catch (e) {
-    return { ok: false, error: e.message }
-  }
+  try { return { ok: true, data: driverTable.update(driverId, { status, ...extra }) } }
+  catch (e) { return { ok: false, error: e.message } }
 }
 
 export function subscribeToDrivers(callback) {
   if (!isLiveMode()) {
     return localSubscribe(DB_KEYS.DRIVERS, () => getDrivers().then(callback))
   }
-
   const sb = getSupabaseClient()
   if (!sb) return () => {}
-
   const channel = sb
     .channel('ap3x-drivers')
-    .on('postgres_changes',
-      { event: '*', schema: 'public', table: 'drivers' },
-      () => getDrivers().then(callback)
-    )
-    .subscribe((status) => {
-      if (status === 'SUBSCRIBED') setStatus('connected')
-      if (status === 'CHANNEL_ERROR') setStatus('sync_delayed')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'drivers' },
+      () => getDrivers().then(callback))
+    .subscribe(s => {
+      if (s === 'SUBSCRIBED')    setStatus('connected')
+      if (s === 'CHANNEL_ERROR') setStatus('sync_delayed')
     })
-
   registerChannel('drivers', channel)
   return () => { try { sb.removeChannel(channel) } catch {} _channels.delete('drivers') }
 }
 
+
 // ═══════════════════════════════════════════════════════════════
-// TASKS / JOBS
+// VEHICLES
+// ═══════════════════════════════════════════════════════════════
+
+export async function getVehicles() {
+  if (isLiveMode()) {
+    const sb = getSupabaseClient()
+    const { data, error } = await sb
+      .from('vehicles')
+      .select('*')
+      .order('reg_number', { ascending: true })
+    if (error) { console.error('[AP3X:Backend] getVehicles:', error); return [] }
+    return data || []
+  }
+  return vehicleTable.list()
+}
+
+export async function updateVehicle(vehicleId, patch) {
+  if (isLiveMode()) {
+    const sb = getSupabaseClient()
+    const { data, error } = await sb
+      .from('vehicles')
+      .update({ ...patch, updated_at: now() })
+      .eq('id', vehicleId)
+      .select()
+      .single()
+    if (error) return { ok: false, error: error.message }
+    return { ok: true, data }
+  }
+  try { return { ok: true, data: vehicleTable.update(vehicleId, patch) } }
+  catch (e) { return { ok: false, error: e.message } }
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// TASKS  (Contract: pending → assigned → accepted → in_progress → completed → cancelled)
 // ═══════════════════════════════════════════════════════════════
 
 export async function getTasks(filter = {}) {
@@ -241,89 +265,55 @@ export async function getTasks(filter = {}) {
     let query = sb.from('tasks').select('*')
     if (filter.assigned_driver) query = query.eq('assigned_driver', filter.assigned_driver)
     if (filter.status)          query = query.eq('status', filter.status)
-
     const { data, error } = await query.order('created_at', { ascending: false })
-    if (error) {
-      console.error('[AP3X:Backend] getTasks error:', error)
-      setStatus('failed')
-      return []
-    }
+    if (error) { console.error('[AP3X:Backend] getTasks:', error); setStatus('failed'); return [] }
     setStatus('connected')
     return data || []
   }
   return jobTable.list(filter)
 }
 
-// ─── CRITICAL: Create job → Supabase (pushes to Driver PWA) ──
-// This is the single source of truth for job creation.
-// In live mode: inserts into Supabase tasks table, which triggers
-// Supabase Realtime → pwaJobSync on driver phones instantly.
-// In local mode: writes to localStorage localDB.
+/**
+ * Create a task (dispatcher → Supabase → Realtime → Driver PWA).
+ * Only inserts into `tasks`. Assignment is separate (assignTask).
+ */
 export async function createTask(payload) {
   const ts = now()
-  const jobData = {
-    title:               payload.title,
-    description:         payload.description         || null,
-    status:              payload.status              || 'pending',
-    priority:            payload.priority            || 'normal',
-    assigned_driver:     payload.assigned_driver     || payload.driver_id || null,
-    assigned_driver_name:payload.assigned_driver_name || payload.driver_name || null,
-    assigned_at:         payload.assigned_driver ? ts : null,
-    vehicle_id:          payload.vehicle_id          || null,
-    vehicle_reg:         payload.vehicle_reg         || null,
-    driver_name:         payload.driver_name         || null,
-    stops:               payload.stops               || null,
-    waypoints:           payload.waypoints           || null,
-    pickup_address:      payload.pickup_address      || payload.origin || null,
-    dropoff_address:     payload.dropoff_address     || payload.destination || null,
-    cancel_reason:       null,
-    completion_notes:    null,
-    created_at:          ts,
-    updated_at:          ts,
+  const row = {
+    title:            payload.title,
+    description:      payload.description      || null,
+    status:           'pending',
+    priority:         payload.priority         || 'normal',
+    stops:            payload.stops            || null,
+    waypoints:        payload.waypoints        || null,
+    pickup_address:   payload.pickup_address   || payload.origin      || null,
+    dropoff_address:  payload.dropoff_address  || payload.destination || null,
+    vehicle_id:       payload.vehicle_id       || null,
+    vehicle_reg:      payload.vehicle_reg      || null,
+    created_at:       ts,
+    updated_at:       ts,
   }
 
   if (isLiveMode()) {
     const sb = getSupabaseClient()
     const { data, error } = await sb
       .from('tasks')
-      .insert(jobData)
+      .insert(row)
       .select()
       .single()
-
-    if (error) {
-      console.error('[AP3X:Backend] createTask error:', error)
-      return { ok: false, error: error.message }
-    }
-
-    // If already assigned, update driver's current_task and log event
-    if (data.assigned_driver) {
-      await sb
-        .from('drivers')
-        .update({ current_task: data.id, updated_at: ts })
-        .eq('id', data.assigned_driver)
-    }
-
-    await _logDashboardEvent('task_created', {
-      task_id:     data.id,
-      title:       data.title,
-      driver_id:   data.assigned_driver,
-      driver_name: data.assigned_driver_name,
-      priority:    data.priority,
-    })
-
-    console.info('[AP3X:Backend] Task created in Supabase:', data.id, '→', data.title)
+    if (error) { console.error('[AP3X:Backend] createTask:', error); return { ok: false, error: error.message } }
+    console.info('[AP3X:Backend] Task created:', data.id, '→', data.title)
     return { ok: true, data }
   }
 
-  // Local fallback
-  try {
-    const created = jobTable.create({ ...jobData, id: undefined })
-    return { ok: true, data: created }
-  } catch (e) {
-    return { ok: false, error: e.message }
-  }
+  try { return { ok: true, data: jobTable.create({ ...row }) } }
+  catch (e) { return { ok: false, error: e.message } }
 }
 
+/**
+ * Update a task (any field — used for lifecycle transitions).
+ * Backend is always the authority. Caller must await before updating UI.
+ */
 export async function updateTask(taskId, updates) {
   if (isLiveMode()) {
     const sb = getSupabaseClient()
@@ -333,30 +323,28 @@ export async function updateTask(taskId, updates) {
       .eq('id', taskId)
       .select()
       .single()
-
-    if (error) {
-      console.error('[AP3X:Backend] updateTask error:', error)
-      return { ok: false, error: error.message }
-    }
-    await _logDashboardEvent('task_updated', { task_id: taskId, ...updates })
+    if (error) { console.error('[AP3X:Backend] updateTask:', error); return { ok: false, error: error.message } }
     return { ok: true, data }
   }
-  try {
-    const updated = jobTable.update(taskId, updates)
-    return { ok: true, data: updated }
-  } catch (e) {
-    return { ok: false, error: e.message }
-  }
+  try { return { ok: true, data: jobTable.update(taskId, updates) } }
+  catch (e) { return { ok: false, error: e.message } }
 }
 
-// ─── CRITICAL: Job Assignment Flow ────────────────────────────
-export async function assignJobToDriver(taskId, driverId, driverName = '') {
-  const assignedAt = now()
+/**
+ * Assign a task to a driver.
+ * Steps:
+ *   1. Insert into job_assignments (creates audit record)
+ *   2. Update tasks.assigned_driver + tasks.status = 'assigned'
+ *   3. Update drivers.current_task
+ * Supabase Realtime on tasks + job_assignments fires → Driver PWA receives it.
+ */
+export async function assignTask(taskId, driverId, vehicleId = null, driverName = '', vehicleReg = '') {
+  const ts = now()
 
   if (isLiveMode()) {
     const sb = getSupabaseClient()
 
-    // Duplicate assignment guard
+    // Idempotency guard
     const { data: existing } = await sb
       .from('tasks')
       .select('id, assigned_driver, status')
@@ -364,172 +352,249 @@ export async function assignJobToDriver(taskId, driverId, driverName = '') {
       .single()
 
     if (existing?.assigned_driver === driverId && existing?.status === 'assigned') {
-      return { ok: false, error: 'Already assigned to this driver', duplicate: true }
+      return { ok: true, data: existing, duplicate: true }
     }
 
+    // 1. Insert job_assignment record
+    const { error: jaError } = await sb
+      .from('job_assignments')
+      .insert({
+        task_id:      taskId,
+        driver_id:    driverId,
+        vehicle_id:   vehicleId  || null,
+        driver_name:  driverName || null,
+        vehicle_reg:  vehicleReg || null,
+        assigned_at:  ts,
+        status:       'assigned',
+      })
+
+    if (jaError) {
+      // Non-fatal — log but don't block the assignment
+      console.warn('[AP3X:Backend] job_assignments insert failed (non-fatal):', jaError.message)
+    }
+
+    // 2. Update tasks
     const { data, error } = await sb
       .from('tasks')
       .update({
         assigned_driver:      driverId,
-        assigned_driver_name: driverName,
+        assigned_driver_name: driverName || null,
+        vehicle_id:           vehicleId  || null,
+        vehicle_reg:          vehicleReg || null,
         status:               'assigned',
-        assigned_at:          assignedAt,
-        updated_at:           assignedAt,
+        assigned_at:          ts,
+        updated_at:           ts,
       })
       .eq('id', taskId)
       .select()
       .single()
 
-    if (error) {
-      console.error('[AP3X:Backend] assignJobToDriver error:', error)
-      return { ok: false, error: error.message }
-    }
+    if (error) { console.error('[AP3X:Backend] assignTask tasks update:', error); return { ok: false, error: error.message } }
 
-    // Update driver's current_task
-    await sb.from('drivers').update({ current_task: taskId, updated_at: assignedAt }).eq('id', driverId)
+    // 3. Update driver.current_task
+    await sb
+      .from('drivers')
+      .update({ current_task: taskId, updated_at: ts })
+      .eq('id', driverId)
 
-    // Audit event
-    await _logDashboardEvent('job_assigned', {
-      task_id: taskId, driver_id: driverId, driver_name: driverName, assigned_at: assignedAt,
-    })
-
+    console.info('[AP3X:Backend] Task assigned:', taskId, '→ driver:', driverId)
     return { ok: true, data }
   }
 
   // Local fallback
   try {
     const updated = jobTable.update(taskId, {
-      driver_id: driverId, driver_name: driverName,
-      status: 'assigned', assigned_at: assignedAt,
+      assigned_driver: driverId, assigned_driver_name: driverName,
+      vehicle_id: vehicleId, vehicle_reg: vehicleReg,
+      status: 'assigned', assigned_at: ts,
     })
-    driverTable.update(driverId, { current_task: taskId })
+    try { driverTable.update(driverId, { current_task: taskId }) } catch {}
     return { ok: true, data: updated }
-  } catch (e) {
-    return { ok: false, error: e.message }
-  }
+  } catch (e) { return { ok: false, error: e.message } }
 }
 
+// Backwards-compat alias used by older code
+export const assignJobToDriver = (taskId, driverId, driverName = '') =>
+  assignTask(taskId, driverId, null, driverName)
+
+/**
+ * Subscribe to task changes.
+ * Realtime ONLY on: tasks (contract rule).
+ * driverFilter: subscribe only to tasks for a specific driver (Driver PWA).
+ */
 export function subscribeToTasks(callback, driverFilter = null) {
   if (!isLiveMode()) {
-    return localSubscribe(DB_KEYS.JOBS, () => {
+    return localSubscribe(DB_KEYS.JOBS, () =>
       getTasks(driverFilter ? { assigned_driver: driverFilter } : {}).then(callback)
-    })
+    )
   }
 
   const sb = getSupabaseClient()
   if (!sb) return () => {}
 
-  const channelKey = driverFilter ? `tasks-driver-${driverFilter}` : 'tasks-all'
-  const filter = driverFilter
+  const key = driverFilter ? `tasks-driver-${driverFilter}` : 'tasks-all'
+  const pgFilter = driverFilter
     ? { event: '*', schema: 'public', table: 'tasks', filter: `assigned_driver=eq.${driverFilter}` }
     : { event: '*', schema: 'public', table: 'tasks' }
 
   const channel = sb
-    .channel(channelKey)
-    .on('postgres_changes', filter, (payload) => {
-      console.debug('[AP3X:Backend] tasks change:', payload.eventType, payload.new?.id)
+    .channel(key)
+    .on('postgres_changes', pgFilter, () =>
       getTasks(driverFilter ? { assigned_driver: driverFilter } : {}).then(callback)
-    })
-    .subscribe((status) => {
-      if (status === 'SUBSCRIBED') setStatus('connected')
-      if (status === 'CHANNEL_ERROR') setStatus('sync_delayed')
+    )
+    .subscribe(s => {
+      if (s === 'SUBSCRIBED')    setStatus('connected')
+      if (s === 'CHANNEL_ERROR') setStatus('sync_delayed')
     })
 
-  registerChannel(channelKey, channel)
-  return () => { try { sb.removeChannel(channel) } catch {} _channels.delete(channelKey) }
+  registerChannel(key, channel)
+  return () => { try { sb.removeChannel(channel) } catch {} _channels.delete(key) }
 }
 
+
 // ═══════════════════════════════════════════════════════════════
-// FLEET / NODES
+// JOB ASSIGNMENTS  (audit log + realtime for dispatcher)
 // ═══════════════════════════════════════════════════════════════
 
+export async function getJobAssignments(taskId = null) {
+  if (!isLiveMode()) return []
+  const sb = getSupabaseClient()
+  let query = sb
+    .from('job_assignments')
+    .select('*')
+    .order('assigned_at', { ascending: false })
+  if (taskId) query = query.eq('task_id', taskId)
+  const { data, error } = await query
+  if (error) { console.error('[AP3X:Backend] getJobAssignments:', error); return [] }
+  return data || []
+}
+
+/**
+ * Subscribe to job_assignment changes (dispatcher dashboard).
+ * Fires when any assignment is created or updated.
+ */
+export function subscribeToJobAssignments(callback) {
+  if (!isLiveMode()) return () => {}
+  const sb = getSupabaseClient()
+  if (!sb) return () => {}
+
+  const channel = sb
+    .channel('ap3x-job-assignments')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'job_assignments' },
+      () => getJobAssignments().then(callback)
+    )
+    .subscribe(s => {
+      if (s === 'SUBSCRIBED')    setStatus('connected')
+      if (s === 'CHANNEL_ERROR') setStatus('sync_delayed')
+    })
+
+  registerChannel('job_assignments', channel)
+  return () => { try { sb.removeChannel(channel) } catch {} _channels.delete('job_assignments') }
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// DRIVER LOCATIONS  (GPS — driver_locations table)
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Upsert driver GPS location.
+ * Called by Driver PWA every 5 seconds.
+ */
+export async function upsertDriverLocation(driverId, locationData) {
+  if (!isLiveMode()) return { ok: false, error: 'offline' }
+  const sb = getSupabaseClient()
+  const { error } = await sb
+    .from('driver_locations')
+    .upsert({
+      driver_id:  driverId,
+      lat:        locationData.lat,
+      lng:        locationData.lng,
+      speed:      locationData.speed   ?? 0,
+      heading:    locationData.heading ?? 0,
+      accuracy:   locationData.accuracy ?? null,
+      status:     locationData.status  ?? 'en_route',
+      updated_at: now(),
+    }, { onConflict: 'driver_id' })
+  if (error) { console.debug('[AP3X:Backend] upsertDriverLocation error:', error.message); return { ok: false, error: error.message } }
+  return { ok: true }
+}
+
+/**
+ * Get all driver locations (fleet map).
+ */
+export async function getDriverLocations() {
+  if (!isLiveMode()) return []
+  const sb = getSupabaseClient()
+  const { data, error } = await sb
+    .from('driver_locations')
+    .select('*')
+  if (error) { console.error('[AP3X:Backend] getDriverLocations:', error); return [] }
+  return data || []
+}
+
+/**
+ * Subscribe to driver_locations changes (fleet map realtime).
+ * Fires on any GPS upsert from any driver.
+ */
+export function subscribeToDriverLocations(callback) {
+  if (!isLiveMode()) return () => {}
+  const sb = getSupabaseClient()
+  if (!sb) return () => {}
+
+  const channel = sb
+    .channel('ap3x-driver-locations')
+    .on('postgres_changes',
+      { event: '*', schema: 'public', table: 'driver_locations' },
+      (payload) => {
+        const row = payload.new
+        if (row) callback(row)
+      }
+    )
+    .subscribe(s => {
+      if (s === 'SUBSCRIBED')    setStatus('connected')
+      if (s === 'CHANNEL_ERROR') setStatus('sync_delayed')
+    })
+
+  registerChannel('driver_locations', channel)
+  return () => { try { sb.removeChannel(channel) } catch {} _channels.delete('driver_locations') }
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// FLEET STATUS  (joined view for dashboard)
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Returns drivers joined with their latest GPS location and current task.
+ * Uses the `active_drivers` view if available, falls back to joined queries.
+ */
 export async function getFleetStatus() {
   if (isLiveMode()) {
     const sb = getSupabaseClient()
+    // Try active_drivers view first (created by sql_2)
+    const { data: viewData, error: viewError } = await sb
+      .from('active_drivers')
+      .select('*')
+
+    if (!viewError && viewData) return viewData
+
+    // Fallback: manual join
     const { data, error } = await sb
       .from('drivers')
       .select('id, name, status, current_task, online, updated_at')
-    if (error) { console.error('[AP3X:Backend] getFleetStatus error:', error); return [] }
+    if (error) { console.error('[AP3X:Backend] getFleetStatus:', error); return [] }
     return data || []
   }
   return driverTable.list()
 }
 
-export async function getFleetNodes() {
-  if (isLiveMode()) {
-    const sb = getSupabaseClient()
-    const { data, error } = await sb
-      .from('fleet_nodes')
-      .select('*')
-      .order('node_name', { ascending: true })
-    if (error) { console.error('[AP3X:Backend] getFleetNodes error:', error); return [] }
-    return data || []
-  }
-  return vehicleTable.list()
-}
+// Legacy alias for older components
+export { getVehicles as getFleetNodes }
 
-export function subscribeToFleetNodes(callback) {
-  if (!isLiveMode()) {
-    return localSubscribe(DB_KEYS.VEHICLES, () => getFleetNodes().then(callback))
-  }
-  const sb = getSupabaseClient()
-  if (!sb) return () => {}
-
-  const channel = sb
-    .channel('ap3x-fleet-nodes')
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'fleet_nodes' }, () => getFleetNodes().then(callback))
-    .subscribe((status) => { if (status === 'SUBSCRIBED') setStatus('connected') })
-
-  registerChannel('fleet_nodes', channel)
-  return () => { try { sb.removeChannel(channel) } catch {} _channels.delete('fleet_nodes') }
-}
 
 // ═══════════════════════════════════════════════════════════════
-// TELEMETRY
-// ═══════════════════════════════════════════════════════════════
-
-export async function getTelemetry(driverId = null) {
-  if (isLiveMode()) {
-    const sb = getSupabaseClient()
-    let query = sb.from('fleet_nodes').select('id, node_name, telemetry, last_seen, online')
-    if (driverId) query = query.eq('id', driverId)
-    const { data, error } = await query
-    if (error) return []
-    return data || []
-  }
-  return driverId ? telemetryTable.list({ driver_id: driverId }) : telemetryTable.list()
-}
-
-// ═══════════════════════════════════════════════════════════════
-// DASHBOARD EVENTS
-// ═══════════════════════════════════════════════════════════════
-
-async function _logDashboardEvent(type, payload) {
-  if (!isLiveMode()) return
-  const sb = getSupabaseClient()
-  try {
-    await sb.from('dashboard_events').insert({ type, payload, created_at: now() })
-  } catch (e) {
-    console.warn('[AP3X:Backend] dashboard_events insert failed:', e)
-  }
-}
-
-export async function getDashboardEvents(limit = 50) {
-  if (isLiveMode()) {
-    const sb = getSupabaseClient()
-    const { data, error } = await sb
-      .from('dashboard_events')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(limit)
-    if (error) return []
-    return data || []
-  }
-  return []
-}
-
-// ═══════════════════════════════════════════════════════════════
-// OFFLINE RECOVERY
+// OFFLINE RECOVERY  (Driver PWA — reconnect flush)
 // ═══════════════════════════════════════════════════════════════
 
 export async function recoverOfflineTasks(driverId, pendingLocalUpdates = []) {
@@ -545,7 +610,7 @@ export async function recoverOfflineTasks(driverId, pendingLocalUpdates = []) {
 
   if (error) return { ok: false, tasks: [], error: error.message }
 
-  // Flush pending local updates
+  // Flush pending local updates (backend wins if status already advanced)
   for (const update of pendingLocalUpdates) {
     try {
       await sb

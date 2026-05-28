@@ -1,80 +1,154 @@
 -- ============================================================
--- AP3X Fleet Control OS — ORIGINAL SCHEMA (SQL 1 of 2)
+-- AP3X Fleet Control OS — BASE SCHEMA  (SQL 1 of 2)
 -- Run this FIRST in your Supabase SQL Editor.
--- This provisions all the base tables for the Control OS.
+--
+-- CONTRACT (LOCKED):
+--   Tables:   profiles · tasks · drivers · vehicles
+--             job_assignments · driver_locations
+--   Realtime: tasks · job_assignments · driver_locations
+--   Roles:    profiles.role = 'dispatcher' | 'driver'
+--
+-- Task lifecycle (strict state machine):
+--   pending → assigned → accepted → in_progress → completed → cancelled
 -- ============================================================
 
 -- Enable UUID extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
--- ─── tasks ────────────────────────────────────────────────────
--- Create tasks first (drivers references it via current_task FK)
-CREATE TABLE IF NOT EXISTS public.tasks (
-  id                    UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  title                 TEXT NOT NULL,
-  description           TEXT,
-  status                TEXT NOT NULL DEFAULT 'pending'
-                          CHECK (status IN ('pending','assigned','accepted','in_progress','completed','cancelled')),
-  assigned_driver       UUID,   -- FK added after drivers table is created
-  assigned_driver_name  TEXT,
-  assigned_at           TIMESTAMPTZ,
-  completed_at          TIMESTAMPTZ,
-  priority              TEXT NOT NULL DEFAULT 'normal'
-                          CHECK (priority IN ('low','normal','high','urgent')),
-  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+-- ─── profiles ─────────────────────────────────────────────────
+-- Supabase user profiles. Links auth.users to AP3X roles.
+-- role = 'dispatcher' (Fleet Control OS) | 'driver' (Driver PWA)
+CREATE TABLE IF NOT EXISTS public.profiles (
+  id          UUID PRIMARY KEY,           -- matches auth.users.id
+  full_name   TEXT,
+  email       TEXT,
+  role        TEXT NOT NULL DEFAULT 'driver'
+                CHECK (role IN ('dispatcher', 'driver', 'admin')),
+  avatar_url  TEXT,
+  phone       TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- ─── drivers ──────────────────────────────────────────────────
+-- Fleet driver records (linked to profiles via id when using Supabase auth,
+-- or standalone records for local-auth builds).
 CREATE TABLE IF NOT EXISTS public.drivers (
   id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   name         TEXT NOT NULL,
   status       TEXT NOT NULL DEFAULT 'offline'
                  CHECK (status IN ('online','offline','driving','on_break','idle')),
   online       BOOLEAN NOT NULL DEFAULT false,
+  current_task UUID,   -- FK to tasks added after tasks table is created
   updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- ─── Cross FKs (add after both tables exist) ──────────────────
+-- ─── vehicles ─────────────────────────────────────────────────
+-- Fleet vehicles. Joined to tasks for routing context.
+CREATE TABLE IF NOT EXISTS public.vehicles (
+  id               UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  reg_number       TEXT NOT NULL,
+  make             TEXT,
+  model            TEXT,
+  type             TEXT DEFAULT 'van',
+  status           TEXT NOT NULL DEFAULT 'available'
+                     CHECK (status IN ('available','in_use','maintenance','retired')),
+  height_m         DOUBLE PRECISION,
+  width_m          DOUBLE PRECISION,
+  length_m         DOUBLE PRECISION,
+  gross_weight_t   DOUBLE PRECISION,
+  axle_weight_t    DOUBLE PRECISION,
+  num_axles        INTEGER,
+  fuel_type        TEXT,
+  euro_standard    TEXT,
+  hazmat           BOOLEAN DEFAULT false,
+  max_speed_kmh    INTEGER,
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ─── tasks ────────────────────────────────────────────────────
+-- All fleet jobs. This is the central lifecycle record.
+-- status MUST follow: pending → assigned → accepted → in_progress → completed → cancelled
+CREATE TABLE IF NOT EXISTS public.tasks (
+  id                    UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  title                 TEXT NOT NULL,
+  description           TEXT,
+  status                TEXT NOT NULL DEFAULT 'pending'
+                          CHECK (status IN ('pending','assigned','accepted','in_progress','completed','cancelled')),
+  priority              TEXT NOT NULL DEFAULT 'normal'
+                          CHECK (priority IN ('low','normal','high','urgent')),
+  -- Assignment
+  assigned_driver       UUID REFERENCES public.drivers(id) ON DELETE SET NULL,
+  assigned_driver_name  TEXT,
+  assigned_at           TIMESTAMPTZ,
+  -- Vehicle
+  vehicle_id            UUID REFERENCES public.vehicles(id) ON DELETE SET NULL,
+  vehicle_reg           TEXT,
+  -- Route
+  pickup_address        TEXT,
+  dropoff_address       TEXT,
+  stops                 JSONB,      -- [{idx,address,name,contact,ref,geocoded}]
+  waypoints             JSONB,
+  route_summary         JSONB,      -- {distance_m, duration_s, provider}
+  -- Lifecycle timestamps
+  accepted_at           TIMESTAMPTZ,
+  started_at            TIMESTAMPTZ,
+  completed_at          TIMESTAMPTZ,
+  cancelled_at          TIMESTAMPTZ,
+  cancel_reason         TEXT,
+  completion_notes      TEXT,
+  -- Audit
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Add FK now that tasks exists
 ALTER TABLE public.drivers
   ADD COLUMN IF NOT EXISTS current_task UUID REFERENCES public.tasks(id) ON DELETE SET NULL;
 
-ALTER TABLE public.tasks
-  ADD COLUMN IF NOT EXISTS assigned_driver UUID REFERENCES public.drivers(id) ON DELETE SET NULL;
-
-CREATE INDEX IF NOT EXISTS idx_tasks_assigned_driver ON public.tasks(assigned_driver);
-CREATE INDEX IF NOT EXISTS idx_tasks_status          ON public.tasks(status);
-CREATE INDEX IF NOT EXISTS idx_tasks_created_at      ON public.tasks(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_drivers_status        ON public.drivers(status);
-
--- ─── fleet_nodes ──────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS public.fleet_nodes (
+-- ─── job_assignments ──────────────────────────────────────────
+-- Audit record for every task assignment event.
+-- Dispatcher creates tasks, then inserts here to assign to a driver.
+-- Realtime on this table notifies Driver PWA of new assignments.
+CREATE TABLE IF NOT EXISTS public.job_assignments (
   id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  node_name   TEXT NOT NULL,
-  online      BOOLEAN NOT NULL DEFAULT false,
-  telemetry   JSONB,
-  last_seen   TIMESTAMPTZ
+  task_id     UUID NOT NULL REFERENCES public.tasks(id)   ON DELETE CASCADE,
+  driver_id   UUID NOT NULL REFERENCES public.drivers(id) ON DELETE CASCADE,
+  vehicle_id  UUID          REFERENCES public.vehicles(id) ON DELETE SET NULL,
+  driver_name TEXT,
+  vehicle_reg TEXT,
+  assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  status      TEXT NOT NULL DEFAULT 'assigned'
+                CHECK (status IN ('assigned','accepted','rejected','completed','cancelled'))
 );
 
--- ─── dashboard_events ─────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS public.dashboard_events (
-  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  type        TEXT NOT NULL,
-  payload     JSONB,
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+-- ─── driver_locations ─────────────────────────────────────────
+-- Real-time GPS per driver. Upserted by Driver PWA every 5 seconds.
+-- Fleet Control OS subscribes via Supabase Realtime for live map.
+CREATE TABLE IF NOT EXISTS public.driver_locations (
+  driver_id   UUID PRIMARY KEY REFERENCES public.drivers(id) ON DELETE CASCADE,
+  lat         DOUBLE PRECISION NOT NULL DEFAULT 0,
+  lng         DOUBLE PRECISION NOT NULL DEFAULT 0,
+  speed       DOUBLE PRECISION NOT NULL DEFAULT 0,
+  heading     DOUBLE PRECISION NOT NULL DEFAULT 0,
+  accuracy    DOUBLE PRECISION,
+  status      TEXT NOT NULL DEFAULT 'offline'
+                CHECK (status IN ('offline','online','en_route','idle','on_break')),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_dashboard_events_type ON public.dashboard_events(type);
-CREATE INDEX IF NOT EXISTS idx_dashboard_events_time ON public.dashboard_events(created_at DESC);
+-- ─── Indexes ──────────────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS idx_tasks_assigned_driver   ON public.tasks(assigned_driver);
+CREATE INDEX IF NOT EXISTS idx_tasks_status            ON public.tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_created_at        ON public.tasks(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tasks_driver_status     ON public.tasks(assigned_driver, status)
+  WHERE status NOT IN ('completed','cancelled');
+CREATE INDEX IF NOT EXISTS idx_drivers_status          ON public.drivers(status);
+CREATE INDEX IF NOT EXISTS idx_job_assignments_task    ON public.job_assignments(task_id);
+CREATE INDEX IF NOT EXISTS idx_job_assignments_driver  ON public.job_assignments(driver_id);
+CREATE INDEX IF NOT EXISTS idx_profiles_role           ON public.profiles(role);
 
--- ─── settings ─────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS public.settings (
-  id      UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  key     TEXT NOT NULL UNIQUE,
-  value   JSONB
-);
-
--- ─── updated_at auto-trigger ──────────────────────────────────
+-- ─── updated_at trigger ───────────────────────────────────────
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -83,40 +157,49 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS set_tasks_updated_at   ON public.tasks;
-DROP TRIGGER IF EXISTS set_drivers_updated_at ON public.drivers;
+DROP TRIGGER IF EXISTS set_tasks_updated_at            ON public.tasks;
+DROP TRIGGER IF EXISTS set_drivers_updated_at          ON public.drivers;
+DROP TRIGGER IF EXISTS set_vehicles_updated_at         ON public.vehicles;
+DROP TRIGGER IF EXISTS set_driver_locations_updated_at ON public.driver_locations;
+DROP TRIGGER IF EXISTS set_profiles_updated_at         ON public.profiles;
 
 CREATE TRIGGER set_tasks_updated_at
-  BEFORE UPDATE ON public.tasks
-  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
-
+  BEFORE UPDATE ON public.tasks FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 CREATE TRIGGER set_drivers_updated_at
-  BEFORE UPDATE ON public.drivers
-  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+  BEFORE UPDATE ON public.drivers FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+CREATE TRIGGER set_vehicles_updated_at
+  BEFORE UPDATE ON public.vehicles FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+CREATE TRIGGER set_driver_locations_updated_at
+  BEFORE UPDATE ON public.driver_locations FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+CREATE TRIGGER set_profiles_updated_at
+  BEFORE UPDATE ON public.profiles FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 -- ─── Row Level Security ───────────────────────────────────────
+ALTER TABLE public.profiles         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.drivers          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.vehicles         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.tasks            ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.fleet_nodes      ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.dashboard_events ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.settings         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.job_assignments  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.driver_locations ENABLE ROW LEVEL SECURITY;
 
--- Public anon access (AP3X uses the anon key everywhere)
+-- Public anon access (AP3X uses the anon key for all requests)
+CREATE POLICY "Public read profiles"          ON public.profiles         FOR SELECT USING (true);
+CREATE POLICY "Public write profiles"         ON public.profiles         FOR ALL    USING (true);
 CREATE POLICY "Public read drivers"           ON public.drivers          FOR SELECT USING (true);
 CREATE POLICY "Public write drivers"          ON public.drivers          FOR ALL    USING (true);
+CREATE POLICY "Public read vehicles"          ON public.vehicles         FOR SELECT USING (true);
+CREATE POLICY "Public write vehicles"         ON public.vehicles         FOR ALL    USING (true);
 CREATE POLICY "Public read tasks"             ON public.tasks            FOR SELECT USING (true);
 CREATE POLICY "Public write tasks"            ON public.tasks            FOR ALL    USING (true);
-CREATE POLICY "Public read fleet_nodes"       ON public.fleet_nodes      FOR SELECT USING (true);
-CREATE POLICY "Public write fleet_nodes"      ON public.fleet_nodes      FOR ALL    USING (true);
-CREATE POLICY "Public read dashboard_events"  ON public.dashboard_events FOR SELECT USING (true);
-CREATE POLICY "Public write dashboard_events" ON public.dashboard_events FOR ALL    USING (true);
-CREATE POLICY "Public read settings"          ON public.settings         FOR SELECT USING (true);
-CREATE POLICY "Public write settings"         ON public.settings         FOR ALL    USING (true);
+CREATE POLICY "Public read job_assignments"   ON public.job_assignments  FOR SELECT USING (true);
+CREATE POLICY "Public write job_assignments"  ON public.job_assignments  FOR ALL    USING (true);
+CREATE POLICY "Public read driver_locations"  ON public.driver_locations FOR SELECT USING (true);
+CREATE POLICY "Public write driver_locations" ON public.driver_locations FOR ALL    USING (true);
 
 -- ─── Realtime publications ────────────────────────────────────
--- Enables Supabase Realtime so the fleet dashboard and driver
--- PWA receive instant updates without polling.
-ALTER PUBLICATION supabase_realtime ADD TABLE public.drivers;
+-- Subscribe ONLY to: tasks · job_assignments · driver_locations (contract rule)
 ALTER PUBLICATION supabase_realtime ADD TABLE public.tasks;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.fleet_nodes;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.dashboard_events;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.job_assignments;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.driver_locations;
+-- Also enable for drivers (used by fleet status panel)
+ALTER PUBLICATION supabase_realtime ADD TABLE public.drivers;

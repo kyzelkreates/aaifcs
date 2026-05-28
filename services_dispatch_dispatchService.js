@@ -1,23 +1,28 @@
 /**
  * ============================================================
- * AP3X — Dispatch Service
+ * AP3X — Dispatch Service  (Fleet Control OS)
  * services/dispatch/dispatchService.js
  *
- * - Routes ALL job operations through backendService (SSOT)
- * - Live mode  → Supabase realtime sync
- * - Local mode → localStorage via localDB
- * - Preserves existing API surface for Dispatch page components
+ * CONTRACT (LOCKED):
+ *   - Supabase is the ONLY source of truth
+ *   - No local state overrides backend
+ *   - Tables: tasks · job_assignments · drivers · vehicles
+ *   - Realtime subscriptions: tasks · job_assignments
+ *   - Dispatcher role only: create tasks, assign tasks, monitor
+ *
+ * Task lifecycle:
+ *   pending → assigned → accepted → in_progress → completed → cancelled
  * ============================================================
  */
 
-import { jobTable, subscribe, DB_KEYS } from './services_local_localDB'
 import {
-  createTask, getTasks, updateTask, assignJobToDriver as backendAssignJob,
-  subscribeToTasks, isLiveMode,
+  createTask, getTasks, updateTask, assignTask,
+  subscribeToTasks, subscribeToJobAssignments,
+  getJobAssignments, isLiveMode,
 } from './services_backend_backendService'
-import { getSupabaseSettings } from './services_supabase_supabaseClient'
+import { jobTable, subscribe as localSubscribe, DB_KEYS } from './services_local_localDB'
 
-// ─── Re-export status constants (consumed by many components) ─
+// ─── Task status constants (contract-locked) ──────────────────
 export const JOB_STATUS = {
   PENDING:     'pending',
   ASSIGNED:    'assigned',
@@ -39,180 +44,157 @@ export const STATUS_COLORS = {
 }
 
 export const PRIORITY_COLORS = {
-  low:    'muted',
-  normal: 'cyan',
-  high:   'amber',
-  urgent: 'red',
+  low: 'muted', normal: 'cyan', high: 'amber', urgent: 'red',
 }
 
-// ─── Internal mode check ─────────────────────────────────────
-function _liveMode() {
-  const s = getSupabaseSettings()
-  return s.enabled && !!s.url && !!s.anonKey
-}
+// ═══════════════════════════════════════════════════════════════
+// DISPATCH SERVICE
+// ═══════════════════════════════════════════════════════════════
 
-// ─── Dispatch service ─────────────────────────────────────────
 export const dispatchService = {
 
+  // ─── READ ──────────────────────────────────────────────────
+
   /**
-   * Fetch jobs — live or local.
-   * Returns a Promise in live mode, array in local mode.
+   * Fetch tasks from Supabase.
+   * Optional filters: { status, assigned_driver }
    */
   async fetchJobs(filters = {}) {
-    if (_liveMode()) {
-      const filter = {}
-      if (filters.status)    filter.status = filters.status
-      if (filters.driver_id) filter.assigned_driver = filters.driver_id
-      return await getTasks(filter)
-    }
-
-    let rows = jobTable.list()
-    if (filters.status)    rows = rows.filter(j => j.status    === filters.status)
-    if (filters.driver_id) rows = rows.filter(j => j.driver_id === filters.driver_id)
-    if (filters.priority)  rows = rows.filter(j => j.priority  === filters.priority)
-    return rows
+    return getTasks(filters)
   },
 
   getJob(id) {
-    return jobTable.get(id)
+    // Local read only (for optimistic UI in offline mode)
+    return jobTable.get?.(id) || null
   },
 
+  // ─── CREATE ────────────────────────────────────────────────
+
   /**
-   * Create a job and write it to Supabase immediately.
-   * In live mode: inserts into Supabase → Realtime pushes to
-   * any Driver PWA subscribed for that driver instantly.
-   * In local mode: writes to localStorage (same-device only).
-   * Returns a Promise in both modes.
+   * Create a new task.
+   * Inserts into `tasks` with status = 'pending'.
+   * If driver/vehicle provided at creation time, also calls assignTask.
+   * Supabase Realtime fires → Driver PWA receives it.
    */
   async createJob(payload) {
-    const base = {
-      status:   JOB_STATUS.PENDING,
-      priority: JOB_PRIORITY.NORMAL,
-      ...payload,
-    }
-
-    if (_liveMode()) {
-      const result = await createTask(base)
-      if (!result.ok) {
-        console.error('[AP3X:Dispatch] createJob failed:', result.error)
-        // Optimistic local fallback so UI isn't blocked
-        const localJob = jobTable.create({ ...base, created_at: new Date().toISOString() })
-        return localJob
-      }
-      // Mirror in local DB for offline fallback
-      try {
-        jobTable.create({ ...result.data, _synced: true })
-      } catch {}
-      return result.data
-    }
-
-    // Local-only mode
-    return jobTable.create({
-      ...base,
-      created_at: new Date().toISOString(),
+    const result = await createTask({
+      title:           payload.title,
+      description:     payload.description    || null,
+      priority:        payload.priority       || JOB_PRIORITY.NORMAL,
+      stops:           payload.stops          || null,
+      waypoints:       payload.waypoints      || null,
+      pickup_address:  payload.pickup_address || payload.origin       || null,
+      dropoff_address: payload.dropoff_address || payload.destination || null,
+      vehicle_id:      payload.vehicle_id     || null,
+      vehicle_reg:     payload.vehicle_reg    || null,
     })
+
+    if (!result.ok) {
+      console.error('[AP3X:Dispatch] createJob failed:', result.error)
+      // Offline fallback — local only until reconnection
+      if (!isLiveMode()) {
+        return jobTable.create({
+          ...payload,
+          status:     JOB_STATUS.PENDING,
+          created_at: new Date().toISOString(),
+        })
+      }
+      throw new Error(result.error)
+    }
+
+    // If already assigned at creation time, wire the assignment
+    if (payload.assigned_driver || payload.driver_id) {
+      const driverId  = payload.assigned_driver || payload.driver_id
+      const vehicleId = payload.vehicle_id || null
+      const driverName = payload.assigned_driver_name || payload.driver_name || ''
+      const vehicleReg = payload.vehicle_reg || ''
+      await assignTask(result.data.id, driverId, vehicleId, driverName, vehicleReg)
+    }
+
+    return result.data
   },
 
-  async updateJob(id, payload) {
-    if (_liveMode()) {
-      const result = await updateTask(id, payload)
-      if (!result.ok) throw new Error(result.error)
-      return result.data
-    }
-    return jobTable.update(id, payload)
-  },
+  // ─── ASSIGN ────────────────────────────────────────────────
 
   /**
-   * CRITICAL: Assign job to driver.
-   * In live mode — writes to Supabase tasks table.
-   * Supabase realtime then pushes the change to Driver PWA instantly.
+   * Assign an existing task to a driver.
+   * Writes to job_assignments + updates tasks.
+   * Supabase Realtime propagates to Driver PWA immediately.
    */
-  async assignJob(jobId, driverId, vehicleId, driverName, vehicleReg) {
-    if (_liveMode()) {
-      const result = await backendAssignJob(jobId, driverId, driverName)
-      if (!result.ok) {
-        if (result.duplicate) return result.data // idempotent
-        throw new Error(result.error)
-      }
-      // Also update local mirror so offline fallback stays fresh
-      try {
-        jobTable.update(jobId, {
-          driver_id:   driverId,
-          vehicle_id:  vehicleId,
-          driver_name: driverName,
-          vehicle_reg: vehicleReg,
-          status:      JOB_STATUS.ASSIGNED,
-          assigned_at: new Date().toISOString(),
-        })
-      } catch {}
-      return result.data
-    }
+  async assignJob(taskId, driverId, vehicleId, driverName, vehicleReg) {
+    const result = await assignTask(taskId, driverId, vehicleId, driverName, vehicleReg)
+    if (!result.ok && !result.duplicate) throw new Error(result.error)
+    return result.data
+  },
 
-    // Local-only assignment
-    return jobTable.update(jobId, {
-      driver_id:   driverId,
-      vehicle_id:  vehicleId,
-      driver_name: driverName,
-      vehicle_reg: vehicleReg,
-      status:      JOB_STATUS.ASSIGNED,
-      assigned_at: new Date().toISOString(),
+  // ─── LIFECYCLE UPDATES ─────────────────────────────────────
+  // All status transitions go through updateTask → Supabase.
+  // Backend state is always the authority.
+
+  async updateJob(taskId, patch) {
+    const result = await updateTask(taskId, patch)
+    if (!result.ok) throw new Error(result.error)
+    return result.data
+  },
+
+  async completeJob(taskId, notes = '') {
+    return this.updateJob(taskId, {
+      status:           JOB_STATUS.COMPLETED,
+      completed_at:     new Date().toISOString(),
+      completion_notes: notes || null,
     })
   },
 
-  async startJob(id) {
-    return this.updateJob(id, {
+  async cancelJob(taskId, reason = '') {
+    return this.updateJob(taskId, {
+      status:        JOB_STATUS.CANCELLED,
+      cancel_reason: reason || null,
+      cancelled_at:  new Date().toISOString(),
+    })
+  },
+
+  async startJob(taskId) {
+    return this.updateJob(taskId, {
       status:     JOB_STATUS.IN_PROGRESS,
       started_at: new Date().toISOString(),
     })
   },
 
-  async completeJob(id, notes = '') {
-    return this.updateJob(id, {
-      status:           JOB_STATUS.COMPLETED,
-      completed_at:     new Date().toISOString(),
-      completion_notes: notes,
-    })
+  deleteJob(taskId) {
+    // Soft delete — mark cancelled rather than hard delete
+    return this.cancelJob(taskId, 'Deleted by dispatcher')
   },
 
-  async cancelJob(id, reason = '') {
-    return this.updateJob(id, {
-      status:       JOB_STATUS.CANCELLED,
-      cancel_reason: reason,
-      cancelled_at:  new Date().toISOString(),
-    })
-  },
-
-  deleteJob(id) {
-    jobTable.delete(id)
-  },
+  // ─── SUBSCRIPTIONS ─────────────────────────────────────────
 
   /**
-   * Subscribe to job changes.
-   * In live mode — Supabase realtime channel.
-   * In local mode — BroadcastChannel across tabs.
-   *
-   * Returns unsubscribe function.
+   * Subscribe to all task changes (fleet dispatch view).
+   * Fires callback with latest tasks array on any change.
    */
   subscribeToJobs(callback) {
-    if (_liveMode()) {
-      return subscribeToTasks(callback)
-    }
-    return subscribe(DB_KEYS.JOBS, (event) => callback(event))
+    return subscribeToTasks(callback)
   },
 
   /**
-   * Subscribe to jobs for a specific driver (Driver PWA).
-   * This is the critical path for the job assignment sync.
+   * Subscribe to job_assignment changes (dispatcher audit view).
+   * Fires callback with latest assignments array on any change.
+   */
+  subscribeToAssignments(callback) {
+    return subscribeToJobAssignments(callback)
+  },
+
+  /**
+   * Subscribe to tasks for a specific driver (Driver PWA use).
+   * Filtered subscription — only fires for that driver's tasks.
    */
   subscribeToDriverJobs(driverId, callback) {
-    if (_liveMode()) {
-      return subscribeToTasks(callback, driverId)
-    }
-    // Local: filter on broadcast events
-    return subscribe(DB_KEYS.JOBS, () => {
-      const rows = jobTable.list({ driver_id: driverId })
-      callback(rows)
-    })
+    return subscribeToTasks(callback, driverId)
+  },
+
+  // ─── JOB ASSIGNMENTS (audit log) ───────────────────────────
+
+  async getAssignmentsForTask(taskId) {
+    return getJobAssignments(taskId)
   },
 }
 
