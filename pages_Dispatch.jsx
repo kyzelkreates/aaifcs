@@ -348,17 +348,19 @@ function JobCard({ job, onAssign, onIntel, onCancel, onComplete, onSync }) {
       {/* Action buttons — full width stacked on mobile */}
       <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-2">
         {job.status === JOB_STATUS.PENDING && (
-          <button
-            onClick={() => onIntel?.(job)}
-            className="text-slate-500 hover:text-violet-400 p-1.5 rounded hover:bg-violet-500/10 transition-colors"
-            title="AI Dispatch Engine"
-          >
-            <Icon name="Cpu" size={13} />
-          </button>
-          <button onClick={() => onAssign?.(job)}
-            className="w-full sm:flex-1 py-2 sm:py-1.5 text-xs bg-cyan-500/10 border border-cyan-500/20 text-cyan-400 rounded-lg hover:bg-cyan-500/20 transition-colors flex items-center justify-center gap-1.5">
-            <Icon name="UserCheck" size={12} />Assign Driver
-          </button>
+          <>
+            <button
+              onClick={() => onIntel?.(job)}
+              className="text-slate-500 hover:text-violet-400 p-1.5 rounded hover:bg-violet-500/10 transition-colors"
+              title="AI Dispatch Engine"
+            >
+              <Icon name="Cpu" size={13} />
+            </button>
+            <button onClick={() => onAssign?.(job)}
+              className="w-full sm:flex-1 py-2 sm:py-1.5 text-xs bg-cyan-500/10 border border-cyan-500/20 text-cyan-400 rounded-lg hover:bg-cyan-500/20 transition-colors flex items-center justify-center gap-1.5">
+              <Icon name="UserCheck" size={12} />Assign Driver
+            </button>
+          </>
         )}
         {[JOB_STATUS.ASSIGNED, JOB_STATUS.IN_PROGRESS].includes(job.status) && (
           <>
@@ -594,7 +596,7 @@ function JobModal({ onClose, onSaved, vehicles, drivers }) {
   const fmtDist = m => m >= 1000 ? `${(m/1000).toFixed(1)} km` : `${Math.round(m)} m`
   const fmtDur  = s => { const h = Math.floor(s/3600), m = Math.floor((s%3600)/60); return h > 0 ? `${h}h ${m}m` : `${m} min` }
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     if (!form.title.trim())        { setError('Job title is required'); return }
     if (stops.every(s => !s.address.trim())) { setError('At least one stop address is required'); return }
     setSaving(true); setError(null)

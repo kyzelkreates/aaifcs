@@ -28,14 +28,14 @@
  */
 
 import { useState } from 'react'
-import Icon from '../components_ui_Icon'
+import Icon from './components_ui_Icon'
 import {
   executeEmergencyStop,
   logInterruption,
   pauseJobExecution,
   resumeJobExecution,
   logJobEvent,
-} from '../services_execution_jobExecutionService'
+} from './services_execution_jobExecutionService'
 
 const INTERRUPT_TYPES = [
   {

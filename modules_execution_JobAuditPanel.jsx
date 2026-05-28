@@ -16,7 +16,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react'
-import Icon from '../components_ui_Icon'
+import Icon from './components_ui_Icon'
 import {
   getJobExecutionState,
   getJobStops,
@@ -24,7 +24,7 @@ import {
   getInterruptionLog,
   subscribeToJobExecution,
   subscribeToJobStops,
-} from '../services_execution_jobExecutionService'
+} from './services_execution_jobExecutionService'
 
 // ── Helpers ───────────────────────────────────────────────────
 function fmtTs(ts) {

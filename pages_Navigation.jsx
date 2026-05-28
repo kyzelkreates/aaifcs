@@ -315,7 +315,7 @@ export default function Navigation() {
   const navigate = useNavigate()
   // Map is always full-screen — exit goes back to dashboard
 
-  useEffect(() => { await fleetService.fetchVehicles() }, [])
+  useEffect(() => { fleetService.fetchVehicles().catch(console.error) }, [])
 
   // Build markers from fleet vehicles + live driver positions
   useEffect(() => {

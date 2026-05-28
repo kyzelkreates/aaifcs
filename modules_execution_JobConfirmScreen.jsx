@@ -19,12 +19,12 @@
  */
 
 import { useState } from 'react'
-import Icon from '../components_ui_Icon'
+import Icon from './components_ui_Icon'
 import {
   executeJobAccept,
   executeJobReject,
   initJobExecution,
-} from '../services_execution_jobExecutionService'
+} from './services_execution_jobExecutionService'
 
 // ── Priority config ───────────────────────────────────────────
 const PRI = {

@@ -23,7 +23,7 @@
  */
 
 import { useState, useEffect, useRef } from 'react'
-import Icon from '../components_ui_Icon'
+import Icon from './components_ui_Icon'
 import {
   executeStopArrival,
   executeStopValidation,
@@ -32,7 +32,7 @@ import {
   startJobExecution,
   completeJobExecution,
   logJobEvent,
-} from '../services_execution_jobExecutionService'
+} from './services_execution_jobExecutionService'
 
 const STOP_TYPE_CFG = {
   pickup:     { icon: 'Package',        color: 'text-emerald-400', bg: 'bg-emerald-500/10 border-emerald-500/20', label: 'Pickup'     },

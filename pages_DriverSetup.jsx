@@ -221,8 +221,11 @@ export default function DriverSetup() {
 
   // ── Load data ─────────────────────────────────────────────
   useEffect(() => {
-    driverService.fetchDrivers()
-    await fleetService.fetchVehicles().catch(console.error)
+    const load = async () => {
+      driverService.fetchDrivers()
+      await fleetService.fetchVehicles().catch(console.error)
+    }
+    load()
   }, [])
 
   // ── Tabs ──────────────────────────────────────────────────
