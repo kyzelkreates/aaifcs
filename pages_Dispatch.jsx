@@ -23,6 +23,8 @@ import { complianceEngine } from './intel_complianceEngine'
 import { safetyEngine }     from './intel_safetyEngine'
 import { driverLearning }   from './intel_driverLearning'
 import { routeScoring }     from './intel_routeScoring'
+import DispatchIntelPanel    from './engine/DispatchIntelPanel'
+import { dispatchOrchestrator } from './engine/dispatch_orchestrator'
 
 const PRIORITY_ICONS = { low: 'ArrowDown', normal: 'Minus', high: 'ArrowUp', urgent: 'AlertOctagon' }
 
@@ -294,7 +296,7 @@ function TelemetryFeed({ events }) {
 }
 
 // ─── Job Card ─────────────────────────────────────────────────
-function JobCard({ job, onAssign, onCancel, onComplete, onSync }) {
+function JobCard({ job, onAssign, onIntel, onCancel, onComplete, onSync }) {
   const priColor = PRIORITY_COLORS[job.priority] || 'muted'
   const stsColor = STATUS_COLORS[job.status] || 'muted'
   return (
@@ -345,6 +347,13 @@ function JobCard({ job, onAssign, onCancel, onComplete, onSync }) {
       {/* Action buttons — full width stacked on mobile */}
       <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-2">
         {job.status === JOB_STATUS.PENDING && (
+          <button
+            onClick={() => onIntel?.(job)}
+            className="text-slate-500 hover:text-violet-400 p-1.5 rounded hover:bg-violet-500/10 transition-colors"
+            title="AI Dispatch Engine"
+          >
+            <Icon name="Cpu" size={13} />
+          </button>
           <button onClick={() => onAssign?.(job)}
             className="w-full sm:flex-1 py-2 sm:py-1.5 text-xs bg-cyan-500/10 border border-cyan-500/20 text-cyan-400 rounded-lg hover:bg-cyan-500/20 transition-colors flex items-center justify-center gap-1.5">
             <Icon name="UserCheck" size={12} />Assign Driver
@@ -936,6 +945,8 @@ export default function Dispatch() {
   const [loading,    setLoading]   = useState(false)
   const [createModal, setCreate]   = useState(false)
   const [assignJob,  setAssignJob] = useState(null)
+  const [intelJob,   setIntelJob]  = useState(null)   // task being analysed by engine
+  const [pendingSuggestion, setPendingSuggestion] = useState(null) // new task auto-flagged
   const [syncJob,    setSyncJob]   = useState(null)
   const [filter,     setFilter]    = useState(null)
   const [telEvents,  setTelEvents] = useState([])
@@ -966,7 +977,14 @@ export default function Dispatch() {
   useEffect(() => {
     load()
     loadDriversAndVehicles()
-    const unsub = dispatchService.subscribeToJobs(() => load())
+    const unsub = dispatchService.subscribeToJobs(async (tasks) => {
+      load()
+      // Auto-flag newly created pending tasks for the intelligence engine
+      if (Array.isArray(tasks)) {
+        const newest = tasks.find(t => t.status === 'pending' && !t.assigned_driver)
+        if (newest) setPendingSuggestion(newest)
+      }
+    })
     // Refresh drivers list when driver status changes
     const unsubDrivers = subscribeToDrivers(() => loadDriversAndVehicles())
     // Listen for incoming driver telemetry
@@ -1054,6 +1072,7 @@ export default function Dispatch() {
             {filtered.map(j => (
               <JobCard key={j.id} job={j}
                 onAssign={setAssignJob}
+                onIntel={setIntelJob}
                 onComplete={handleComplete}
                 onCancel={handleCancel}
                 onSync={setSyncJob}
@@ -1062,6 +1081,33 @@ export default function Dispatch() {
           </div>
         )}
       </div>
+
+      {/* ── New-task intelligence nudge ────────────────────── */}
+      {pendingSuggestion && !intelJob && (
+        <div className="fixed bottom-4 right-4 z-40 max-w-xs bg-[#0d1426] border border-violet-500/30 rounded-xl shadow-2xl p-3 flex items-start gap-3">
+          <div className="w-8 h-8 rounded-lg bg-violet-500/20 flex items-center justify-center flex-shrink-0">
+            <Icon name="Cpu" size={14} className="text-violet-400" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="text-xs font-semibold text-white">New task — AI engine ready</div>
+            <div className="text-2xs text-slate-500 truncate mt-0.5">{pendingSuggestion.title}</div>
+            <div className="flex gap-2 mt-2">
+              <button
+                onClick={() => { setIntelJob(pendingSuggestion); setPendingSuggestion(null) }}
+                className="text-2xs bg-violet-500/20 text-violet-400 hover:bg-violet-500/30 px-2.5 py-1 rounded-lg font-medium transition-colors"
+              >
+                Analyse &amp; Dispatch
+              </button>
+              <button
+                onClick={() => setPendingSuggestion(null)}
+                className="text-2xs text-slate-600 hover:text-slate-400 px-2 py-1 transition-colors"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Modals */}
       {createModal && (
@@ -1086,6 +1132,24 @@ export default function Dispatch() {
           job={syncJob}
           onClose={() => setSyncJob(null)}
         />
+      )}
+
+      {/* ── AI Dispatch Intelligence Panel ── */}
+      {intelJob && (
+        <div className="fixed inset-0 z-50 flex">
+          {/* Backdrop */}
+          <div className="flex-1 bg-black/60 backdrop-blur-sm" onClick={() => setIntelJob(null)} />
+          {/* Panel */}
+          <div className="w-full max-w-sm bg-[#080f1e] border-l border-slate-800/60 flex flex-col shadow-2xl">
+            <DispatchIntelPanel
+              task={intelJob}
+              drivers={drivers}
+              vehicles={vehicles}
+              onDispatched={() => { setIntelJob(null); load() }}
+              onClose={() => setIntelJob(null)}
+            />
+          </div>
+        </div>
       )}
     </div>
   )
