@@ -23,6 +23,10 @@ import { authService } from './services_supabase_authService'
 import { AI_PROVIDERS } from './services_ai_aiConfig'
 import { MAP_PROVIDERS, PROVIDER_DEFINITIONS } from './services_maps_mapProviders'
 import { getRuntimeKey, setRuntimeKey, RUNTIME_KEYS } from './services_maps_runtimeKeys'
+import {
+  saveGraphHopperKey, loadGraphHopperKey, testGraphHopperKey,
+  loadRoutingConstraints, saveRoutingConstraints, getLocalRoutingConstraints,
+} from './services_settings_appSettingsService'
 import { ROUTES } from './config_routes'
 import {
   getSupabaseSettings, saveSupabaseSettings, testSupabaseConnection, destroySupabaseClient,
@@ -619,78 +623,203 @@ function AIPanel() {
   )
 }
 
+// ─── GraphHopper + Map Config Panel ──────────────────────────
 function MapPanel() {
   const { provider, setProvider } = useMapStore(s => ({ provider: s.provider, setProvider: s.setProvider }))
   const providers = Object.values(PROVIDER_DEFINITIONS)
 
-  // Runtime API key state — reads from localStorage, updates live
-  const [ghKey,   setGhKey]  = useState(() => getRuntimeKey(RUNTIME_KEYS.GRAPHHOPPER) || '')
-  const [gmKey,   setGmKey]  = useState(() => getRuntimeKey(RUNTIME_KEYS.GOOGLE_MAPS) || '')
-  const [mbKey,   setMbKey]  = useState(() => getRuntimeKey(RUNTIME_KEYS.MAPBOX) || '')
-  const [saved,   setSaved]  = useState(false)
-  const [testing, setTesting] = useState(null) // 'graphhopper'|'google'|null
-  const [testRes, setTestRes] = useState({})   // { graphhopper: 'ok'|'fail', google: 'ok'|'fail' }
+  // ── GraphHopper key state ────────────────────────────────
+  const [ghKey,     setGhKey]     = useState(() => getRuntimeKey(RUNTIME_KEYS.GRAPHHOPPER) || '')
+  const [ghSaving,  setGhSaving]  = useState(false)
+  const [ghSaved,   setGhSaved]   = useState(false)
+  const [ghTesting, setGhTesting] = useState(false)
+  const [ghResult,  setGhResult]  = useState(null)  // { ok, message }
 
-  const saveKeys = () => {
-    setRuntimeKey(RUNTIME_KEYS.GRAPHHOPPER, ghKey)
-    setRuntimeKey(RUNTIME_KEYS.GOOGLE_MAPS, gmKey)
-    setRuntimeKey(RUNTIME_KEYS.MAPBOX,      mbKey)
-    setSaved(true)
-    setTimeout(() => setSaved(false), 2500)
-    // Force provider re-check
+  // ── Other map keys ───────────────────────────────────────
+  const [gmKey, setGmKey] = useState(() => getRuntimeKey(RUNTIME_KEYS.GOOGLE_MAPS) || '')
+  const [mbKey, setMbKey] = useState(() => getRuntimeKey(RUNTIME_KEYS.MAPBOX) || '')
+  const [mapKeySaved, setMapKeySaved] = useState(false)
+
+  // ── Routing constraints ──────────────────────────────────
+  const [constraints, setConstraints] = useState(() => getLocalRoutingConstraints())
+  const [constraintsSaved, setConstraintsSaved] = useState(false)
+
+  // Load from Supabase on mount
+  useEffect(() => {
+    loadGraphHopperKey().then(k => { if (k) setGhKey(k) })
+    loadRoutingConstraints().then(c => setConstraints(c))
+  }, [])
+
+  const handleSaveGH = async () => {
+    setGhSaving(true)
+    setGhResult(null)
+    await saveGraphHopperKey(ghKey)
     if (ghKey && provider !== 'graphhopper') setProvider('graphhopper')
-    else if (gmKey && provider === 'osm')    setProvider('google')
+    setGhSaving(false)
+    setGhSaved(true)
+    setTimeout(() => setGhSaved(false), 3000)
   }
 
-  const testKey = async (which) => {
-    setTesting(which)
-    try {
-      if (which === 'graphhopper') {
-        const key = ghKey || getRuntimeKey(RUNTIME_KEYS.GRAPHHOPPER)
-        const r = await fetch(`https://graphhopper.com/api/1/geocode?q=London&key=${key}&limit=1`)
-        setTestRes(p => ({ ...p, graphhopper: r.ok ? 'ok' : 'fail' }))
-      } else if (which === 'google') {
-        const key = gmKey || getRuntimeKey(RUNTIME_KEYS.GOOGLE_MAPS)
-        const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=London&key=${key}`)
-        const d = await r.json()
-        setTestRes(p => ({ ...p, google: d.status === 'OK' || d.status === 'ZERO_RESULTS' ? 'ok' : 'fail' }))
-      }
-    } catch { setTestRes(p => ({ ...p, [which]: 'fail' })) }
-    setTesting(null)
+  const handleTestGH = async () => {
+    setGhTesting(true)
+    setGhResult(null)
+    const result = await testGraphHopperKey(ghKey)
+    setGhResult(result)
+    setGhTesting(false)
   }
 
-  const API_ENTRIES = [
-    {
-      id:    'graphhopper',
-      label: 'GraphHopper API Key',
-      desc:  'Primary routing engine — turn-by-turn, isochrones, matrix',
-      link:  'https://graphhopper.com/#pricing',
-      val:   ghKey, set: setGhKey,
-      test:  () => testKey('graphhopper'),
-      testState: testRes.graphhopper,
-    },
-    {
-      id:    'google',
-      label: 'Google Maps API Key',
-      desc:  'Directions, Places, Geocoding API — enable in Google Cloud Console',
-      link:  'https://console.cloud.google.com/apis',
-      val:   gmKey, set: setGmKey,
-      test:  () => testKey('google'),
-      testState: testRes.google,
-    },
-    {
-      id:    'mapbox',
-      label: 'Mapbox Access Token',
-      desc:  'Dark vector tiles + Mapbox Directions',
-      link:  'https://account.mapbox.com/access-tokens',
-      val:   mbKey, set: setMbKey,
-      test:  null,
-      testState: null,
-    },
+  const handleSaveMapKeys = () => {
+    setRuntimeKey(RUNTIME_KEYS.GOOGLE_MAPS, gmKey)
+    setRuntimeKey(RUNTIME_KEYS.MAPBOX, mbKey)
+    setMapKeySaved(true)
+    setTimeout(() => setMapKeySaved(false), 2500)
+    if (gmKey && provider === 'osm') setProvider('google')
+  }
+
+  const handleSaveConstraints = async () => {
+    await saveRoutingConstraints(constraints)
+    setConstraintsSaved(true)
+    setTimeout(() => setConstraintsSaved(false), 2500)
+  }
+
+  const CONSTRAINT_DEFS = [
+    { key: 'enforceHeightRestrictions', label: 'Enforce height restrictions',   sub: 'Avoid roads with clearance below vehicle height' },
+    { key: 'enforceWeightRestrictions', label: 'Enforce weight restrictions',   sub: 'Avoid roads with weight limits below vehicle GVW' },
+    { key: 'enforceHazmatRestrictions', label: 'Enforce hazmat restrictions',   sub: 'Avoid hazmat-prohibited roads for flagged vehicles' },
+    { key: 'preferTruckRoutes',         label: 'Prefer designated truck routes', sub: 'Route via HGV-friendly corridors where available' },
+    { key: 'requestAlternatives',       label: 'Fetch alternative routes',      sub: 'Show up to 3 route options ranked by safety score' },
+    { key: 'elevationAnalysis',         label: 'Gradient / elevation analysis', sub: 'Flag steep sections for heavy vehicles' },
+    { key: 'avoidTollRoads',            label: 'Avoid toll roads',              sub: 'Prefer toll-free routes (may add journey time)' },
+    { key: 'avoidMotorways',            label: 'Avoid motorways',               sub: 'Local/A-road routing only — not recommended for HGV' },
+    { key: 'avoidFerries',              label: 'Avoid ferries',                 sub: 'Keep routing land-only' },
   ]
 
   return (
     <div className="space-y-0">
+
+      {/* ── GraphHopper — Primary Routing Engine ─────────────── */}
+      <SectionHead label="GraphHopper — Intelligent Routing Engine" />
+      <div className="bg-slate-900/60 border border-cyan-500/20 rounded-xl p-5 mb-6 space-y-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2 mb-1">
+              <Icon name="Route" size={16} className="text-cyan-400" />
+              <span className="text-sm font-semibold text-white">GraphHopper API Key</span>
+              {ghKey && <span className="text-2xs bg-emerald-500/15 text-emerald-400 border border-emerald-500/20 rounded-full px-2 py-0.5">Key saved</span>}
+            </div>
+            <p className="text-xs text-slate-500 leading-relaxed">
+              Required for intelligent vehicle-aware routing — enforces height, weight, hazmat and legal restrictions.
+              Saved to Supabase so Fleet OS and all Driver PWAs share it automatically.
+            </p>
+          </div>
+          <a href="https://graphhopper.com/#pricing" target="_blank" rel="noopener noreferrer"
+            className="text-2xs text-cyan-500 hover:text-cyan-400 flex items-center gap-1 flex-shrink-0 mt-1 whitespace-nowrap">
+            Get key <Icon name="ExternalLink" size={9} />
+          </a>
+        </div>
+
+        <div className="flex gap-2">
+          <div className="relative flex-1">
+            <input
+              type="password"
+              value={ghKey}
+              onChange={e => { setGhKey(e.target.value); setGhResult(null) }}
+              placeholder="Paste your GraphHopper API key…"
+              className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2.5 text-xs text-white placeholder-slate-600 focus:border-cyan-500/60 focus:outline-none font-mono pr-8"
+            />
+            {ghKey && (
+              <div className="absolute right-2.5 top-1/2 -translate-y-1/2">
+                <div className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="flex gap-2">
+          <button
+            onClick={handleTestGH}
+            disabled={!ghKey || ghTesting}
+            className={`flex-1 py-2.5 rounded-lg border text-xs font-semibold transition-all flex items-center justify-center gap-2 disabled:opacity-40 ${
+              ghResult?.ok === true  ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400' :
+              ghResult?.ok === false ? 'border-red-500/30 bg-red-500/10 text-red-400' :
+              'border-slate-700 bg-slate-800/60 text-slate-300 hover:text-white'
+            }`}>
+            {ghTesting
+              ? <><Icon name="Loader2" size={12} className="animate-spin" /> Testing…</>
+              : ghResult?.ok === true
+              ? <><Icon name="CheckCircle2" size={12} /> Valid</>
+              : ghResult?.ok === false
+              ? <><Icon name="XCircle" size={12} /> Failed</>
+              : <><Icon name="Zap" size={12} /> Test Key</>}
+          </button>
+          <button
+            onClick={handleSaveGH}
+            disabled={!ghKey || ghSaving}
+            className={`flex-1 py-2.5 rounded-lg border text-xs font-semibold transition-all flex items-center justify-center gap-2 disabled:opacity-40 ${
+              ghSaved
+                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400'
+                : 'border-cyan-500/30 bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/15'
+            }`}>
+            {ghSaving
+              ? <><Icon name="Loader2" size={12} className="animate-spin" /> Saving…</>
+              : ghSaved
+              ? <><Icon name="CheckCircle2" size={12} /> Saved to Fleet!</>
+              : <><Icon name="Save" size={12} /> Save to Fleet</>}
+          </button>
+        </div>
+
+        {ghResult && (
+          <div className={`flex items-start gap-2 text-xs rounded-lg p-3 ${
+            ghResult.ok
+              ? 'bg-emerald-500/8 border border-emerald-500/20 text-emerald-400'
+              : 'bg-red-500/8 border border-red-500/20 text-red-400'
+          }`}>
+            <Icon name={ghResult.ok ? 'CheckCircle2' : 'AlertCircle'} size={13} className="flex-shrink-0 mt-0.5" />
+            <span>{ghResult.message}</span>
+          </div>
+        )}
+
+        <div className="text-2xs text-slate-700 flex items-center gap-1.5">
+          <Icon name="Cloud" size={10} />
+          Key is saved to Supabase — Fleet OS and Driver PWA automatically pick it up.
+        </div>
+      </div>
+
+      {/* ── Vehicle Routing Constraints ───────────────────────── */}
+      <SectionHead label="Intelligent Routing Constraints" />
+      <div className="bg-slate-900/40 border border-slate-800/60 rounded-xl overflow-hidden mb-6">
+        <div className="px-4 py-3 border-b border-slate-800/60 flex items-center justify-between">
+          <div>
+            <div className="text-xs font-semibold text-white">Vehicle & Legal Constraints</div>
+            <div className="text-2xs text-slate-600 mt-0.5">Applied fleet-wide when GraphHopper plans routes</div>
+          </div>
+          <button
+            onClick={handleSaveConstraints}
+            className={`px-3 py-1.5 rounded-lg border text-2xs font-semibold transition-all flex items-center gap-1.5 ${
+              constraintsSaved
+                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400'
+                : 'border-cyan-500/30 bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/15'
+            }`}>
+            {constraintsSaved
+              ? <><Icon name="CheckCircle2" size={10} /> Saved</>
+              : <><Icon name="Save" size={10} /> Save</>}
+          </button>
+        </div>
+        {CONSTRAINT_DEFS.map(({ key, label, sub }) => (
+          <div key={key} className="flex items-center justify-between px-4 py-3 border-b border-slate-800/40 last:border-0">
+            <div>
+              <div className="text-xs font-medium text-white">{label}</div>
+              <div className="text-2xs text-slate-600 mt-0.5">{sub}</div>
+            </div>
+            <Toggle
+              value={!!constraints[key]}
+              onChange={v => setConstraints(p => ({ ...p, [key]: v }))}
+            />
+          </div>
+        ))}
+      </div>
+
+      {/* ── Map Provider ──────────────────────────────────────── */}
       <SectionHead label="Map Provider" />
       <div className="grid grid-cols-2 gap-3 mb-6">
         {providers.map(p => {
@@ -715,9 +844,13 @@ function MapPanel() {
         })}
       </div>
 
-      <SectionHead label="API Keys" />
+      {/* ── Other API Keys ────────────────────────────────────── */}
+      <SectionHead label="Other Map API Keys" />
       <div className="space-y-4 mb-6">
-        {API_ENTRIES.map(entry => (
+        {[
+          { id: 'google', label: 'Google Maps API Key', desc: 'Directions, Places, Geocoding — Google Cloud Console', link: 'https://console.cloud.google.com/apis', val: gmKey, set: setGmKey },
+          { id: 'mapbox', label: 'Mapbox Access Token',  desc: 'Dark vector tiles + Mapbox Directions', link: 'https://account.mapbox.com/access-tokens', val: mbKey, set: setMbKey },
+        ].map(entry => (
           <div key={entry.id} className="bg-slate-900/40 border border-slate-800/60 rounded-xl p-4 space-y-2.5">
             <div className="flex items-start justify-between gap-2">
               <div>
@@ -729,62 +862,36 @@ function MapPanel() {
                 Get key <Icon name="ExternalLink" size={9} />
               </a>
             </div>
-            <div className="flex gap-2">
-              <div className="relative flex-1">
-                <input
-                  type="password"
-                  value={entry.val}
-                  onChange={e => entry.set(e.target.value)}
-                  placeholder={entry.val ? '••••••••••••••••' : `Paste ${entry.label}…`}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-600 focus:border-cyan-500/60 focus:outline-none font-mono pr-8"
-                />
-                {entry.val && (
-                  <div className="absolute right-2.5 top-1/2 -translate-y-1/2">
-                    <div className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                  </div>
-                )}
-              </div>
-              {entry.test && (
-                <button onClick={entry.test} disabled={!entry.val || testing === entry.id}
-                  className={`px-3 py-2 rounded-lg border text-xs font-semibold transition-colors flex items-center gap-1.5 flex-shrink-0 ${
-                    entry.testState === 'ok'   ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400' :
-                    entry.testState === 'fail' ? 'border-red-500/30 bg-red-500/10 text-red-400' :
-                    'border-slate-700 bg-slate-800/60 text-slate-400 hover:text-slate-200'
-                  } disabled:opacity-40`}>
-                  {testing === entry.id
-                    ? <Icon name="Loader2" size={11} className="animate-spin" />
-                    : entry.testState === 'ok'
-                    ? <Icon name="CheckCircle2" size={11} />
-                    : entry.testState === 'fail'
-                    ? <Icon name="XCircle" size={11} />
-                    : <Icon name="Zap" size={11} />}
-                  {entry.testState === 'ok' ? 'Valid' : entry.testState === 'fail' ? 'Failed' : 'Test'}
-                </button>
-              )}
-            </div>
+            <input
+              type="password"
+              value={entry.val}
+              onChange={e => entry.set(e.target.value)}
+              placeholder={`Paste ${entry.label}…`}
+              className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-600 focus:border-cyan-500/60 focus:outline-none font-mono"
+            />
           </div>
         ))}
-
-        <button onClick={saveKeys}
+        <button onClick={handleSaveMapKeys}
           className={`w-full py-2.5 rounded-xl border text-sm font-semibold transition-all flex items-center justify-center gap-2 ${
-            saved
+            mapKeySaved
               ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400'
-              : 'border-cyan-500/30 bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/15'
+              : 'border-slate-700 bg-slate-800/60 text-slate-300 hover:border-slate-600'
           }`}>
-          {saved ? <><Icon name="CheckCircle2" size={14} /> Saved!</> : <><Icon name="Save" size={14} /> Save API Keys</>}
+          {mapKeySaved ? <><Icon name="CheckCircle2" size={14} /> Saved!</> : <><Icon name="Save" size={14} /> Save Map Keys</>}
         </button>
         <p className="text-2xs text-slate-700 text-center">
-          Keys are stored in your browser (localStorage). They are never sent to any server other than the provider's own API.
+          These keys are stored in your browser only. GraphHopper key above is synced fleet-wide via Supabase.
         </p>
       </div>
 
+      {/* ── OSM Fallback ─────────────────────────────────────── */}
       <SectionHead label="OSM / OSRM Fallback" />
       <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-lg p-4 flex items-center gap-3">
         <Icon name="CheckCircle2" size={16} className="text-emerald-400 flex-shrink-0" />
         <div>
           <div className="text-sm font-medium text-emerald-400">Always-on fallback active</div>
           <div className="text-xs text-slate-500 mt-0.5">
-            OpenStreetMap + OSRM routing requires no API key and is always available as the final fallback.
+            OpenStreetMap + OSRM requires no API key and activates automatically if GraphHopper is unavailable.
           </div>
         </div>
       </div>

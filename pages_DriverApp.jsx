@@ -42,6 +42,7 @@ import { aiRouter }   from './services_ai_aiRouter'
 import { mapService }   from './services_maps_mapService'
 import { routeCache }  from './services_routing_routeCache'
 import { getRuntimeKey, RUNTIME_KEYS } from './services_maps_runtimeKeys'
+import { loadGraphHopperKey, getLocalRoutingConstraints } from './services_settings_appSettingsService'
 import { safetyService, ALERT_TYPE, ALERT_SEVERITY } from './services_safety_safetyService'
 import { mountDriverBridge } from './services_apex_apexBridge'
 import {
@@ -713,6 +714,11 @@ function DriverAppMain({ profile, onLogout }) {
       apexBridgeRef.current = null
     }
   }, [profile?.id])  // eslint-disable-line
+
+  // ── Bootstrap GraphHopper key from Supabase fleet settings ──
+  useEffect(() => {
+    loadGraphHopperKey().catch(() => {})
+  }, [])
 
   // ── GPS state ────────────────────────────────────────────────
   const [pos,      setPos]      = useState(null)
