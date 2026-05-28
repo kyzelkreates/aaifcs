@@ -65,6 +65,14 @@ import { getSupabaseSettings } from './services_supabase_supabaseClient'
 import { DriverConnectionRow } from './components_ui_ConnectionStatus'
 
 
+import SafetyDashboard   from './modules_safety_ui_SafetyDashboard'
+import DashcamView       from './modules_safety_ui_DashcamView'
+import HazardReportForm  from './modules_safety_ui_HazardReportForm'
+import IncidentTimeline  from './modules_safety_ui_IncidentTimeline'
+import RouteReplayView   from './modules_safety_ui_RouteReplayView'
+import ExportCenter      from './modules_safety_ui_ExportCenter'
+import { startSafetySync, stopSafetySync } from './services_safety_syncService'
+
 // ── Fix default Leaflet marker icons ─────────────────────────
 delete L.Icon.Default.prototype._getIconUrl
 L.Icon.Default.mergeOptions({
@@ -733,6 +741,7 @@ function DriverAppMain({ profile, onLogout }) {
 
   // ── UI tabs ───────────────────────────────────────────────────
   const [tab, setTab] = useState('map') // 'map'|'safety'|'chat'|'jobs'
+  const [safetyScreen, setSafetyScreen] = useState('hub') // 'hub'|'dashcam'|'hazards'|'incidents'|'playback'|'export'
 
   // ── Chat state ───────────────────────────────────────────────
   const [messages,    setMessages]   = useState(loadMsgs)
@@ -772,6 +781,12 @@ function DriverAppMain({ profile, onLogout }) {
   const appRef = useRef(null)
   const fsButtonRef  = useRef(null)   // attached to the topbar FS button
   const wakeLockRef  = useRef(null)   // Screen Wake Lock — prevents sleep during navigation
+
+  // ── Safety Sync — isolated, driver-only ─────────────────────
+  useEffect(() => {
+    startSafetySync()
+    return () => stopSafetySync()
+  }, [])
 
   // ── Screen Wake Lock — prevent screen sleep during active navigation ──
   // Non-fatal: degrades silently on browsers that don't support it.
@@ -1954,7 +1969,31 @@ function DriverAppMain({ profile, onLogout }) {
 
       {/* ══════════ SAFETY TAB ══════════ */}
       {tab === 'safety' && (
-        <div className="flex-1 overflow-y-auto scrollbar-none p-4 space-y-4">
+        <div className="flex-1 flex flex-col overflow-hidden">
+          {/* Sub-screen router */}
+          {safetyScreen === 'dashcam' && (
+            <DashcamView onBack={() => setSafetyScreen('hub')} driverId={profile?.id} taskId={activeJob?.id} />
+          )}
+          {safetyScreen === 'hazards' && (
+            <HazardReportForm onBack={() => setSafetyScreen('hub')} driverId={profile?.id} taskId={activeJob?.id} />
+          )}
+          {safetyScreen === 'incidents' && (
+            <IncidentTimeline onBack={() => setSafetyScreen('hub')} driverId={profile?.id} taskId={activeJob?.id} />
+          )}
+          {safetyScreen === 'playback' && (
+            <RouteReplayView onBack={() => setSafetyScreen('hub')} driverId={profile?.id} taskId={activeJob?.id} />
+          )}
+          {safetyScreen === 'export' && (
+            <ExportCenter onBack={() => setSafetyScreen('hub')} driverId={profile?.id} taskId={activeJob?.id} />
+          )}
+          {safetyScreen === 'hub' && (
+          <div className="flex-1 overflow-y-auto scrollbar-none">
+            <SafetyDashboard
+              fatigueScore={fatigueScore}
+              alertLevel={alertLevel}
+              onNavigate={setSafetyScreen}
+            />
+            <div className="px-4 space-y-4">
 
           {/* Live metric grid */}
           <div className="grid grid-cols-2 gap-3">
@@ -2109,7 +2148,10 @@ function DriverAppMain({ profile, onLogout }) {
                 ))}
               </div>
             )}
+            </div>
+            </div>{/* end px-4 space-y-4 */}
           </div>
+          )} {/* end safetyScreen === 'hub' */}
         </div>
       )}
 
