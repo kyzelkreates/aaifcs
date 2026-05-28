@@ -67,23 +67,6 @@ export default defineConfig({
         // Remove old caches on update
         cleanupOutdatedCaches: true,
 
-        // Background sync for offline job updates
-        backgroundSync: {
-          name: 'apex-job-sync',
-          options: {
-            onSync: async ({ queue }) => {
-              let entry
-              while ((entry = await queue.shiftRequest())) {
-                try {
-                  await fetch(entry.request)
-                } catch {
-                  await queue.unshiftRequest(entry)
-                  throw new Error('Replay failed — network unavailable')
-                }
-              }
-            },
-          },
-        },
 
         // Runtime caching rules
         runtimeCaching: [
