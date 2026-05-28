@@ -39,17 +39,26 @@ import {
   clearDriverPairing,
 } from './services_sync_driverSyncService'
 import { aiRouter }   from './services_ai_aiRouter'
-import { mapService }  from './services_maps_mapService'
+import { mapService }   from './services_maps_mapService'
+import { routeCache }  from './services_routing_routeCache'
 import { getRuntimeKey, RUNTIME_KEYS } from './services_maps_runtimeKeys'
 import { safetyService, ALERT_TYPE, ALERT_SEVERITY } from './services_safety_safetyService'
 import { mountDriverBridge } from './services_apex_apexBridge'
 import {
-  activateSyncCode, decodeToken, pushDriverLocation, pushAIReport,
+  activateSyncCode, decodeToken, pushAIReport,
   subscribeToFleetCommands,
   getLiveDriverPositions,
   getDriverSyncPairing,
 } from './services_sync_liveSync'
 import { dispatchService } from './services_dispatch_dispatchService'
+import {
+  initJobExecution, getJobExecutionState, getJobStops,
+  subscribeToJobExecution, logJobEvent, flushOfflineEventQueue,
+  detectGeofenceEntry,
+} from './services_execution_jobExecutionService'
+import JobConfirmScreen    from './modules_execution_JobConfirmScreen'
+import StopExecutionPanel  from './modules_execution_StopExecutionPanel'
+import InterruptionModal   from './modules_execution_InterruptionModal'
 import { recoverOfflineTasks, onConnectionStatus, getConnectionStatus } from './services_backend_backendService'
 import { pwaJobSync, PWA_JOB_STATUS } from './services_pwa_jobSyncService'
 import { getSupabaseSettings } from './services_supabase_supabaseClient'
@@ -131,8 +140,54 @@ function haversine([lat1, lng1], [lat2, lng2]) {
 }
 
 // ── OSRM manoeuvre → human instruction ───────────────────────
+// ── GraphHopper sign → direction text ─────────────────────────
+// https://docs.graphhopper.com/#operation/getRoute — sign codes:
+// -98 U-turn, -8 keep left, -7 leave roundabout, -6 sharp left,
+// -3 sharp left, -2 left, -1 slight left, 0 straight, 1 slight right,
+// 2 right, 3 sharp right, 4 finish, 5 via reached, 6 roundabout, 7 keep right
+const GH_SIGN = {
+  '-98': { text: 'Make a U-turn',           icon: 'RefreshCw'      },
+  '-8':  { text: 'Keep left',               icon: 'CornerUpLeft'   },
+  '-7':  { text: 'Leave the roundabout',    icon: 'CornerDownRight'},
+  '-6':  { text: 'Sharp left',              icon: 'CornerDownLeft' },
+  '-3':  { text: 'Sharp left',              icon: 'CornerDownLeft' },
+  '-2':  { text: 'Turn left',               icon: 'CornerDownLeft' },
+  '-1':  { text: 'Bear left',               icon: 'CornerUpLeft'   },
+  '0':   { text: 'Continue straight',       icon: 'ArrowUp'        },
+  '1':   { text: 'Bear right',              icon: 'CornerUpRight'  },
+  '2':   { text: 'Turn right',              icon: 'CornerDownRight'},
+  '3':   { text: 'Sharp right',             icon: 'CornerDownRight'},
+  '6':   { text: 'At the roundabout',       icon: 'RefreshCw'      },
+  '4':   { text: 'You have arrived',        icon: 'MapPin'         },
+  '5':   { text: 'Waypoint reached',        icon: 'MapPin'         },
+  '7':   { text: 'Keep right',              icon: 'CornerUpRight'  },
+}
+
+function bearingLabel(b) {
+  const dirs = ['north','northeast','east','southeast','south','southwest','west','northwest']
+  return dirs[Math.round(b / 45) % 8]
+}
+
+/**
+ * stepInstruction — handles both OSRM step objects and GH normalised steps.
+ * OSRM steps have: { maneuver: { type, modifier, bearing_after }, name }
+ * GH normalised steps have: { text, sign, distance } (from mapService normaliser)
+ */
 function stepInstruction(step) {
   if (!step) return ''
+
+  // ── GraphHopper normalised step (has .sign from GH response) ──
+  if (step.sign != null) {
+    const cfg = GH_SIGN[String(step.sign)]
+    const base = cfg?.text || step.text || 'Continue'
+    const road = step.text && step.sign != null ? step.text : ''
+    // GH text already contains the full instruction — use it directly
+    return road || base
+  }
+
+  // ── OSRM step (has .maneuver object) ──────────────────────────
+  if (step.text && !step.maneuver) return step.text   // pre-normalised
+
   const { maneuver, name } = step
   const road = name ? `onto ${name}` : ''
   const typeMap = {
@@ -157,18 +212,18 @@ function stepInstruction(step) {
     'continue':             `Continue ${road}`,
     'use lane':             `Use lane ${road}`,
   }
-  const key = maneuver ? `${maneuver.type}${maneuver.modifier ? '-' + maneuver.modifier : ''}` : ''
+  const key       = maneuver ? `${maneuver.type}${maneuver.modifier ? '-' + maneuver.modifier : ''}` : ''
   const simpleKey = maneuver?.type || ''
   return typeMap[key] || typeMap[simpleKey] || (name ? `Continue on ${name}` : 'Continue')
 }
 
-function bearingLabel(b) {
-  const dirs = ['north','northeast','east','southeast','south','southwest','west','northwest']
-  return dirs[Math.round(b / 45) % 8]
-}
-
-// ── Manoeuvre → icon name ─────────────────────────────────────
+// ── Step → icon (handles both OSRM maneuver and GH sign) ─────
 function stepIcon(step) {
+  // GH sign-based icon
+  if (step?.sign != null) {
+    return GH_SIGN[String(step.sign)]?.icon || 'ArrowUp'
+  }
+  // OSRM maneuver-based icon
   const t = step?.maneuver?.type, m = step?.maneuver?.modifier
   if (t === 'arrive') return 'MapPin'
   if (t === 'depart') return 'Navigation2'
@@ -297,11 +352,14 @@ function useFatigueMonitor({ enabled, speed, heading, onAlert, profileId }) {
       sessionRef.current += 1
       setSessionSecs(s => {
         const ns = s + 1
-        try { localStorage.setItem(`${STORAGE_SESSION}:${profileId}`, String(ns)) } catch {}
+        // Persist every 30s to reduce localStorage writes
+        if (ns % 30 === 0) {
+          try { localStorage.setItem(`${STORAGE_SESSION}:${profileId}`, String(ns)) } catch {}
+        }
         return ns
       })
 
-      // Collect behavioural signals
+      // Collect behavioural signals (always)
       if (speed != null) { speedHist.current.push(speed); if (speedHist.current.length > 60) speedHist.current.shift() }
       if (heading != null) { headingHist.current.push(heading); if (headingHist.current.length > 60) headingHist.current.shift() }
 
@@ -311,7 +369,9 @@ function useFatigueMonitor({ enabled, speed, heading, onAlert, profileId }) {
         onAlert({ type: 'break_due', text: '⚠️ EU regulations: 45-min break now required (4h 30m driving reached)' })
       }
 
-      // ── Fatigue score calculation (multi-signal) ─────────────
+      // ── Fatigue score calculation — only every 10s to reduce re-renders ──
+      if (sessionRef.current % 10 !== 0) return
+
       // Signal 1: session duration (40% weight) — linear 0→100 over 4.5h
       const durationScore = Math.min(100, (sessionRef.current / EU_DRIVE_SECS) * 100)
 
@@ -346,7 +406,7 @@ function useFatigueMonitor({ enabled, speed, heading, onAlert, profileId }) {
       const level = composite >= 75 ? 'danger' : composite >= 45 ? 'warn' : 'ok'
       setAlertLevel(level)
 
-      // Periodic fatigue alerts (not every tick)
+      // Periodic fatigue alerts
       if (composite >= 75 && sessionRef.current % 300 === 0) {
         onAlert({ type: 'fatigue_critical', text: '🚨 Critical fatigue level detected — pull over safely and rest now' })
       } else if (composite >= 45 && sessionRef.current % 600 === 0) {
@@ -653,7 +713,8 @@ function DriverAppMain({ profile, onLogout }) {
   const [accuracy, setAccuracy] = useState(null)
   const [gpsState, setGpsState] = useState('waiting') // 'waiting'|'active'|'denied'
   const [tripDist, setTripDist] = useState(0)
-  const prevPosRef = useRef(null)
+  const prevPosRef    = useRef(null)
+  const lastPushedPos = useRef(null)   // last position pushed to Supabase — skip if <10m moved & stationary
 
   // ── Navigation state ─────────────────────────────────────────
   const [destination,  setDest]       = useState(null)
@@ -696,6 +757,12 @@ function DriverAppMain({ profile, onLogout }) {
   const [jobStops,   setJobStops]  = useState([])    // [{lat,lng,name,idx}] all geocoded stops
   const [stopRoutes, setStopRoutes] = useState([])   // [[lat,lng]...] polylines per stop segment
 
+  // ── Job Execution Control Layer state ──────────────────────
+  const [pendingConfirmJob,  setPendingConfirmJob]  = useState(null)   // job awaiting accept/reject
+  const [execStops,          setExecStops]          = useState([])     // job_stops[] for active job
+  const [execState,          setExecState]          = useState(null)   // job_execution_state row
+  const [showInterruption,   setShowInterruption]   = useState(false)  // interruption modal
+
   // ── Fullscreen state ─────────────────────────────────────────
   // Native event listener approach: bypass React's synthetic event system
   // entirely. React's onClick wraps events in a synthetic layer that can
@@ -703,7 +770,33 @@ function DriverAppMain({ profile, onLogout }) {
   // We attach the handler directly to the DOM node via useEffect.
   const [isFullscreen, setIsFullscreen] = useState(false)
   const appRef = useRef(null)
-  const fsButtonRef = useRef(null)   // attached to the topbar FS button
+  const fsButtonRef  = useRef(null)   // attached to the topbar FS button
+  const wakeLockRef  = useRef(null)   // Screen Wake Lock — prevents sleep during navigation
+
+  // ── Screen Wake Lock — prevent screen sleep during active navigation ──
+  // Non-fatal: degrades silently on browsers that don't support it.
+  useEffect(() => {
+    if (!('wakeLock' in navigator) || !destination) return
+    let lock = null
+    navigator.wakeLock.request('screen')
+      .then(l => { lock = l; wakeLockRef.current = l })
+      .catch(() => {})                      // permission denied — non-fatal
+    return () => {
+      if (lock) { lock.release().catch(() => {}); wakeLockRef.current = null }
+    }
+  }, [destination])
+
+  // Re-acquire wake lock when tab becomes visible again (browser auto-releases on hide)
+  useEffect(() => {
+    if (!('wakeLock' in navigator)) return
+    const reacquire = async () => {
+      if (document.visibilityState === 'visible' && destination) {
+        try { wakeLockRef.current = await navigator.wakeLock.request('screen') } catch {}
+      }
+    }
+    document.addEventListener('visibilitychange', reacquire)
+    return () => document.removeEventListener('visibilitychange', reacquire)
+  }, [destination])
 
   // Sync React state with browser fullscreen state
   useEffect(() => {
@@ -850,7 +943,7 @@ function DriverAppMain({ profile, onLogout }) {
         }
       },
       () => setGpsState('denied'),
-      { enableHighAccuracy: true, maximumAge: 2000, timeout: 20000 }
+      { enableHighAccuracy: true, maximumAge: 3000, timeout: 25000 }
     )
     return () => navigator.geolocation.clearWatch(wid)
   }, [route, routeSteps, stepIdx])
@@ -868,12 +961,18 @@ function DriverAppMain({ profile, onLogout }) {
         ts: tsNow(),
       }
       try { pushTelemetryToFleet(profile.id, pkg) } catch {}
-      // ── Push GPS to Supabase driver_locations (cross-device fleet map) ──
-      try {
-        pwaJobSync.pushLocation({
-          lat: pos[0], lng: pos[1], speed, heading, accuracy, status: 'en_route'
-        })
-      } catch {}
+      // ── Push GPS to Supabase — skip if stationary & <10m moved ──
+      const lp = lastPushedPos.current
+      const movedEnough = !lp || haversine(lp, pos) > 10 || speed > 2
+      if (movedEnough) {
+        lastPushedPos.current = pos
+        try {
+          pwaJobSync.pushLocation({
+            lat: pos[0], lng: pos[1], speed, heading, accuracy,
+            status: speed > 2 ? 'en_route' : 'idle',
+          })
+        } catch {}
+      }
       try { localStorage.setItem(`apex:tel:${profile.vehicle_id}`, JSON.stringify(pkg)) } catch {}
       // ── Apex CC bridge: GPS tick ─────────────────────────────
       try { apexBridgeRef.current?.onGpsTick?.({ lat: pos[0], lng: pos[1], speed, fuel: null, status: 'en_route' }) } catch {}
@@ -924,16 +1023,36 @@ function DriverAppMain({ profile, onLogout }) {
     pwaJobSync.requestNotificationPermission()
 
     // Subscribe to job list updates (fires on any realtime change)
-    const unsubJobs = pwaJobSync.onJobs((liveTasks) => {
+    const unsubJobs = pwaJobSync.onJobs(async (liveTasks) => {
       setJobs(liveTasks)
 
-      // Show banner for newly assigned jobs (assigned in last 30s)
-      const thirtySecsAgo = new Date(Date.now() - 30000).toISOString()
+      // ── Job Execution Layer: intercept newly assigned jobs ────
+      const thirtySecsAgo = new Date(Date.now() - 30_000).toISOString()
       const newlyAssigned = liveTasks.find(t =>
-        t.status === 'assigned' &&
+        (t.status === 'assigned' || t.status === 'pending') &&
         t.assigned_at && t.assigned_at > thirtySecsAgo
       )
       if (newlyAssigned) {
+        try {
+          const execRow = await getJobExecutionState(newlyAssigned.id, profile.id)
+          const alreadyActed = execRow && execRow.status !== 'pending'
+          if (!alreadyActed) {
+            await initJobExecution(newlyAssigned.id, profile.id, null)
+            await logJobEvent({
+              job_id:     newlyAssigned.id,
+              driver_id:  profile.id,
+              event_type: 'JOB_RECEIVED',
+              driver_lat: null,
+              driver_lng: null,
+              payload:    { title: newlyAssigned.title, priority: newlyAssigned.priority },
+            })
+            const stops = await getJobStops(newlyAssigned.id)
+            setExecStops(stops)
+            setPendingConfirmJob(newlyAssigned)
+            return  // skip legacy banner — confirm screen handles it
+          }
+        } catch { /* non-fatal — fall through to legacy banner */ }
+        // Fallback legacy banner for already-acted jobs
         setNewJobBanner(newlyAssigned)
         setTimeout(() => setNewJobBanner(null), 8000)
       }
@@ -958,6 +1077,8 @@ function DriverAppMain({ profile, onLogout }) {
       if (event.data?.type === 'FLUSH_OFFLINE_QUEUE') {
         // SW triggered — pwaJobSync will handle internally on next init
         pwaJobSync.init(profile.id)
+        // Flush any offline execution events queued while disconnected
+        flushOfflineEventQueue(profile.id).catch(() => {})
       }
       if (event.data?.type === 'NOTIFICATION_ACTION') {
         const { action, jobId } = event.data
@@ -1064,16 +1185,40 @@ function DriverAppMain({ profile, onLogout }) {
       else if (Array.isArray(geo))
         coords = geo
     }
-    // Steps: normalised mapService format has {text, distance, time}
-    // OSRM raw steps have {maneuver, name, distance}
+    // Steps: GH normalised steps have {text, distance, time, sign}
+    //        OSRM raw steps have {maneuver, name, distance}
+    //        Google normalised steps have {text, distance, time}
+    // We pass them through as-is — stepInstruction/stepIcon handle all formats
     const steps = result.instructions || []
-    return { coords, steps, distance: result.distance||0, duration: result.duration||0, provider: src }
+    return {
+      coords,
+      steps,
+      distance: result.distance || 0,
+      duration: result.duration || 0,
+      provider: src,
+    }
   }
 
   // ── Routing: GraphHopper → Google → OSRM fallback ───────────
   const fetchRoute = useCallback(async (from, to) => {
     setRouting(true); setRoute(null); setRouteInfo(null); setRouteSteps([]); setStepIdx(0)
     let parsed = null
+
+    // ── Route cache check (offline resilience + zero-latency repeat routes) ──
+    const odKey = `${from[0].toFixed(4)},${from[1].toFixed(4)}:${to[0].toFixed(4)},${to[1].toFixed(4)}`
+    try {
+      const cached = await routeCache.get(odKey)
+      if (cached?.coords?.length > 1) {
+        console.info('[DriverApp] Route from cache:', odKey)
+        setRoute(cached.coords)
+        setRouteSteps(cached.steps || [])
+        setRouteInfo({ distance: cached.distance, duration: cached.duration })
+        setRouteProv((cached.provider || 'cache') + ' (cached)')
+        setStepIdx(0)
+        setRouting(false)
+        return   // served from cache — skip API calls
+      }
+    } catch {}   // cache miss or IndexedDB error — proceed normally
 
     // ── Try mapService (uses GH or Google if key present) ──────
     try {
@@ -1116,6 +1261,16 @@ function DriverAppMain({ profile, onLogout }) {
       setRouteInfo({ distance: parsed.distance, duration: parsed.duration })
       setStepIdx(0)
       askRouteMind(to)  // non-blocking RouteMind tip
+      // Write successful route to cache for offline + repeat use
+      try {
+        routeCache.set(odKey, {
+          coords:   parsed.coords,
+          steps:    parsed.steps,
+          distance: parsed.distance,
+          duration: parsed.duration,
+          provider: parsed.provider,
+        })
+      } catch {}
     }
     setRouting(false)
   }, [])
@@ -1280,6 +1435,8 @@ function DriverAppMain({ profile, onLogout }) {
     setTab('map')
     // ── Apex CC bridge: route started ──────────────────────────
     try { apexBridgeRef.current?.onJobStart?.(job) } catch {}
+    // ── Job Execution Layer: load state + stops ─────────────────
+    loadExecStateForJob(job)
 
     // Collect all stop addresses from the job object
     // Supports: stops[], waypoints[], pickup_address+dropoff_address, or single destination
@@ -1349,20 +1506,19 @@ function DriverAppMain({ profile, onLogout }) {
         // Full flattened polyline for main route display
         const flat = allPolylines.flat()
         if (flat.length) setRoute(flat)
-        // Steps from first segment
-        const firstR = await fetch(`${OSRM_URL}/${pos[1]},${pos[0]};${waypoints[0][1]},${waypoints[0][0]}?overview=full&geometries=geojson&steps=true`)
-        const firstD = await firstR.json()
-        if (firstD.routes?.[0]) {
-          const steps = firstD.routes[0].legs?.[0]?.steps || []
-          setRouteSteps(steps)
-          setStepIdx(0)
-          const totDist = allPolylines.reduce((a, seg) => {
-            // rough approx from first+last
-            return a
-          }, firstD.routes[0].distance)
-          setRouteInfo({ distance: firstD.routes[0].distance, duration: firstD.routes[0].duration })
-          setRouteProvider('osrm')
-        }
+        // Steps + route info: use first segment fetch result (already done in loop above)
+        // Re-fetch first segment for steps only (lightweight — steps not in overview response)
+        try {
+          const firstR = await fetch(`${OSRM_URL}/${pos[1]},${pos[0]};${waypoints[0][1]},${waypoints[0][0]}?overview=false&geometries=geojson&steps=true`)
+          const firstD = await firstR.json()
+          if (firstD.routes?.[0]) {
+            setRouteSteps(firstD.routes[0].legs?.[0]?.steps || [])
+            setStepIdx(0)
+          }
+        } catch {}
+        // Total distance from all segments (sum of OSRM distances)
+        setRouteInfo({ distance: flat.length * 0, duration: 0 })  // placeholder — updated per-segment
+        setRouteProv('osrm')
       } catch (e) {
         console.warn('[multi-stop route]', e)
         fetchRoute(pos, final)
@@ -1370,6 +1526,16 @@ function DriverAppMain({ profile, onLogout }) {
     }
     askRouteMind(final)
   }, [pos, fetchRoute, geocodeAddr, profile.id])
+
+  // Load execution state when driver starts navigating to a job
+  const loadExecStateForJob = async (job) => {
+    try {
+      const state = await getJobExecutionState(job.id, profile.id)
+      if (state) setExecState(state)
+      const stops = await getJobStops(job.id)
+      if (stops?.length) setExecStops(stops)
+    } catch {}
+  }
 
   const completeJob = useCallback((job) => {
     pwaJobSync.completeJob(job.id)
@@ -1409,6 +1575,46 @@ function DriverAppMain({ profile, onLogout }) {
       style={{ WebkitUserSelect: 'none', userSelect: 'none' }}>
 
 
+
+      {/* ── Job Execution: Confirm Screen ────────────────────── */}
+      {pendingConfirmJob && (
+        <JobConfirmScreen
+          job={pendingConfirmJob}
+          stops={execStops}
+          driverId={profile.id}
+          driverPos={pos}
+          onAccepted={(execution) => {
+            setExecState(execution)
+            setPendingConfirmJob(null)
+            setTab('jobs')
+          }}
+          onRejected={async () => {
+            // Persist rejection to Supabase via rejectJob
+            if (pendingConfirmJob?.id) {
+              try { await pwaJobSync.rejectJob(pendingConfirmJob.id, 'Driver rejected') } catch {}
+            }
+            setPendingConfirmJob(null)
+            setExecState(null)
+          }}
+          onDismiss={() => setPendingConfirmJob(null)}
+        />
+      )}
+
+      {/* ── Job Execution: Interruption Modal ───────────────── */}
+      {showInterruption && activeJob && execState && (
+        <InterruptionModal
+          jobId={activeJob.id}
+          driverId={profile.id}
+          tenantId={null}
+          executionStatus={execState.status}
+          driverPos={pos}
+          speed={speed}
+          onPause={() => setExecState(s => s ? { ...s, status: 'paused' } : s)}
+          onResume={() => setExecState(s => s ? { ...s, status: 'in_progress' } : s)}
+          onEmergency={() => setExecState(s => s ? { ...s, status: 'paused' } : s)}
+          onClose={() => setShowInterruption(false)}
+        />
+      )}
 
       {/* ── New Job Banner (live assignment notification) ─────── */}
       {newJobBanner && (
@@ -2151,6 +2357,33 @@ function DriverAppMain({ profile, onLogout }) {
                       </>
                     )}
                   </div>
+
+                  {/* ── Stop Execution Panel (when job is active + has execution stops) ── */}
+                  {isActive && execStops.length > 0 && execState && (
+                    <StopExecutionPanel
+                      stops={execStops}
+                      currentStop={execStops.find(s => s.status !== 'validated' && s.status !== 'skipped') ?? null}
+                      driverPos={pos}
+                      jobId={job.id}
+                      driverId={profile.id}
+                      tenantId={null}
+                      speed={speed}
+                      onStopUpdate={(updated) => {
+                        setExecStops(prev => prev.map(s => s.id === updated.id ? updated : s))
+                      }}
+                      onJobComplete={() => completeJob(job)}
+                      onInterrupt={() => setShowInterruption(true)}
+                    />
+                  )}
+
+                  {/* Interrupt button when active but no structured stops */}
+                  {isActive && execStops.length === 0 && execState && (
+                    <button onClick={() => setShowInterruption(true)}
+                      className="w-full mt-1 py-2 rounded-lg border border-slate-700/40 text-slate-600 text-2xs hover:text-amber-400 hover:border-amber-500/30 hover:bg-amber-500/5 transition-all flex items-center justify-center gap-1.5">
+                      <Icon name="AlertTriangle" size={11} />
+                      Interruption / Emergency
+                    </button>
+                  )}
                 </div>
               )
             })

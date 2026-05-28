@@ -20,6 +20,7 @@ import {
 } from './services_sync_driverSyncService'
 import { formatDateTime } from './utils_format'
 import { complianceEngine } from './intel_complianceEngine'
+import JobAuditPanel from './modules_execution_JobAuditPanel'
 import { safetyEngine }     from './intel_safetyEngine'
 import { driverLearning }   from './intel_driverLearning'
 import { routeScoring }     from './intel_routeScoring'

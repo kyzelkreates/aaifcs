@@ -109,10 +109,13 @@ function normalizeRoute(raw, source) {
       duration:     path.time / 1000,
       geometry:     path.points,
       instructions: (path.instructions || []).map(i => ({
-        text:     i.text,
-        distance: i.distance,
-        time:     i.time / 1000,
-        sign:     i.sign
+        text:        i.text,
+        distance:    i.distance,
+        time:        i.time / 1000,
+        sign:        i.sign,          // GH direction sign (-2=left, 0=straight, 2=right, etc.)
+        exit_number: i.exit_number,   // roundabout exit
+        interval:    i.interval,      // [start,end] waypoint index range
+        street_name: i.street_name,   // street after the manoeuvre
       })),
       bbox:         path.bbox,
       attribution:  PROVIDER_DEFINITIONS[MAP_PROVIDERS.GRAPHHOPPER].attribution.text
@@ -150,6 +153,24 @@ function normalizeRoute(raw, source) {
       attribution: PROVIDER_DEFINITIONS[MAP_PROVIDERS.OSM].attribution.text
     }
   }
+  if (source === 'mapbox') {
+    const route = raw.routes?.[0]
+    if (!route) return null
+    return {
+      source,
+      distance:     route.distance,
+      duration:     route.duration,
+      geometry:     route.geometry,   // GeoJSON LineString
+      instructions: (route.legs?.[0]?.steps || []).map(s => ({
+        text:     s.maneuver?.instruction || s.maneuver?.type,
+        distance: s.distance,
+        time:     s.duration,
+        maneuver: s.maneuver,         // pass through for icon resolution
+        name:     s.name,
+      })),
+      attribution: PROVIDER_DEFINITIONS[MAP_PROVIDERS.MAPBOX]?.attribution?.text || '© Mapbox'
+    }
+  }
   return raw
 }
 
@@ -181,14 +202,48 @@ function normalizeGeocode(raw, source) {
       lng:     parseFloat(r.lon)
     }))
   }
+  if (source === 'mapbox') {
+    return (raw || []).map(f => ({
+      source,
+      name:    f.place_name,
+      address: f.place_name,
+      lat:     f.center[1],
+      lng:     f.center[0],
+    }))
+  }
   return []
+}
+
+// ─── Mapbox Directions Adapter ───────────────────────────────
+const mapboxAdapter = {
+  async route(origin, destination, options = {}) {
+    const token = getRuntimeKey(RUNTIME_KEYS.MAPBOX)
+    if (!token) throw new Error('Mapbox token not configured')
+    const profile = options.profile || 'driving'
+    const url = `https://api.mapbox.com/directions/v5/mapbox/${profile}/${origin.lng},${origin.lat};${destination.lng},${destination.lat}?alternatives=false&geometries=geojson&steps=true&overview=full&access_token=${token}`
+    const res = await fetch(url)
+    if (!res.ok) throw new Error(`Mapbox error: ${res.status}`)
+    const data = await res.json()
+    if (!data.routes?.length) throw new Error('Mapbox: no routes returned')
+    return normalizeRoute(data, 'mapbox')
+  },
+
+  async geocode(query) {
+    const token = getRuntimeKey(RUNTIME_KEYS.MAPBOX)
+    if (!token) throw new Error('Mapbox token not configured')
+    const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(query)}.json?access_token=${token}&limit=5`
+    const res = await fetch(url)
+    if (!res.ok) throw new Error(`Mapbox geocode error: ${res.status}`)
+    const data = await res.json()
+    return normalizeGeocode(data.features || [], 'mapbox')
+  }
 }
 
 // ─── Adapter Map ──────────────────────────────────────────────
 const ADAPTERS = {
   [MAP_PROVIDERS.GRAPHHOPPER]: graphHopperAdapter,
   [MAP_PROVIDERS.GOOGLE]:      googleAdapter,
-  [MAP_PROVIDERS.MAPBOX]:      null,   // Run 4
+  [MAP_PROVIDERS.MAPBOX]:      mapboxAdapter,
   [MAP_PROVIDERS.OSM]:         osmAdapter
 }
 

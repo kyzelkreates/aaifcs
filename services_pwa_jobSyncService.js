@@ -152,7 +152,16 @@ class PWAJobSyncService {
     })
   }
 
-  /** Driver cancels task → status: cancelled */
+  /** Driver rejects an assigned task before accepting → status: cancelled */
+  async rejectJob(jobId, reason = '') {
+    return this._updateStatus(jobId, PWA_JOB_STATUS.CANCELLED, {
+      cancel_reason:  reason || 'Driver rejected',
+      cancelled_at:   tsNow(),
+      rejection_note: reason || null,
+    })
+  }
+
+  /** Driver cancels an in-progress task → status: cancelled */
   async cancelJob(jobId, reason = '') {
     return this._updateStatus(jobId, PWA_JOB_STATUS.CANCELLED, {
       cancel_reason: reason || null,
@@ -423,13 +432,13 @@ class PWAJobSyncService {
 
   // ── Retry ───────────────────────────────────────────────────
 
-  _scheduleRetry(delay = 8000) {
+  _scheduleRetry(delay = 4000) {   // exponential backoff: 4s → 8s → 16s → ... → 64s
     clearTimeout(this._retryTimer)
     this._retryTimer = setTimeout(async () => {
       if (this._destroyed) return
       autoInitSupabase()
       if (isSupabaseReady()) await this._fetchAndSubscribe()
-      else this._scheduleRetry(Math.min(delay * 2, 60000))
+      else this._scheduleRetry(Math.min(delay * 2, 64000))  // cap at 64s
     }, delay)
   }
 
