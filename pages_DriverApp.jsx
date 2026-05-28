@@ -43,6 +43,10 @@ import { mapService }   from './services_maps_mapService'
 import { routeCache }  from './services_routing_routeCache'
 import { getRuntimeKey, RUNTIME_KEYS } from './services_maps_runtimeKeys'
 import { loadGraphHopperKey, getLocalRoutingConstraints } from './services_settings_appSettingsService'
+import {
+  subscribeFederationRealtime, reconcileFederationState,
+  FC_KEYS as FEDERATION_KEYS,
+} from './services_federation_pairingEngine'
 import { safetyService, ALERT_TYPE, ALERT_SEVERITY } from './services_safety_safetyService'
 import { mountDriverBridge } from './services_apex_apexBridge'
 import {
@@ -715,9 +719,23 @@ function DriverAppMain({ profile, onLogout }) {
     }
   }, [profile?.id])  // eslint-disable-line
 
-  // ── Bootstrap GraphHopper key from Supabase fleet settings ──
+  // ── Bootstrap: GraphHopper key + Federation state ────────────
   useEffect(() => {
+    // Load GH key from Supabase fleet settings
     loadGraphHopperKey().catch(() => {})
+    // Reconcile federation state — Driver PWA inherits from Supabase fleet_nodes
+    reconcileFederationState().catch(() => {})
+  }, [])
+
+  // ── Federation realtime inheritance ───────────────────────────
+  // Driver PWA inherits federation state automatically.
+  // No active action needed — just keeps local cache in sync.
+  useEffect(() => {
+    const unsub = subscribeFederationRealtime(() => {
+      // State change handled internally by pairingEngine cache
+      // Driver PWA does not act on federation status changes directly
+    })
+    return unsub
   }, [])
 
   // ── GPS state ────────────────────────────────────────────────

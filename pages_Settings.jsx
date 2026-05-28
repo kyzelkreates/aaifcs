@@ -15,6 +15,7 @@ import {
   ensurePairingCode, refreshPairingCode, getPairingStatus, getRegisteredIdentity,
   markAsRegistered, disconnect, saveCommandCenterUrl, getCommandCenterUrl,
   testConnection, pollPairingStatus, FC_KEYS,
+  subscribeFederationRealtime, reconcileFederationState, normalizeAndValidate,
 } from './services_federation_pairingEngine'
 import apexClient from './services_apex_apexClient'
 import { apiUsageTracker } from './services_ai_aiUsageTracker'
@@ -1007,37 +1008,42 @@ function IntegrationsPanel() {
 // Federation Panel — Apex Command Center Pairing Protocol
 // Code format: APEX-XXXXXXXX-XXXX-FC
 // ─────────────────────────────────────────────────────────────
+// ─── Federation Panel (Stabilized) ───────────────────────────
 function FederationPanel() {
-  // ── Pairing state ──────────────────────────────────────────
-  const [status,        setStatus]        = useState('unregistered')  // 'unregistered'|'pending'|'registered'
-  const [pairingCode,   setPairingCode]   = useState(null)            // { code, expiresAt }
-  const [identity,      setIdentity]      = useState(null)            // registered identity
-  const [loading,       setLoading]       = useState(true)
-  const [ccUrl,         setCcUrl]         = useState(() => getCommandCenterUrl())
-  const [ccUrlInput,    setCcUrlInput]    = useState(() => getCommandCenterUrl())
-  const [ccUrlSaved,    setCcUrlSaved]    = useState(false)
-  const [ccTestState,   setCcTestState]   = useState(null)  // null|'testing'|'ok'|'fail'
-  const [copied,        setCopied]        = useState(null)
-  const [countdown,     setCountdown]     = useState('')
-  const [regenConfirm,  setRegenConfirm]  = useState(false)
-  const [regening,      setRegening]      = useState(false)
+  const [status,       setStatus]       = useState('unregistered')
+  const [pairingCode,  setPairingCode]  = useState(null)
+  const [identity,     setIdentity]     = useState(null)
+  const [loading,      setLoading]      = useState(true)
+  const [ccUrl,        setCcUrl]        = useState(() => getCommandCenterUrl())
+  const [ccUrlInput,   setCcUrlInput]   = useState(() => getCommandCenterUrl())
+  const [ccUrlSaved,   setCcUrlSaved]   = useState(false)
+  const [ccTestState,  setCcTestState]  = useState(null)
+  const [copied,       setCopied]       = useState(null)
+  const [countdown,    setCountdown]    = useState('')
+  const [regenConfirm, setRegenConfirm] = useState(false)
+  const [regening,     setRegening]     = useState(false)
+  const [showManual,   setShowManual]   = useState(false)
+  const [manualTenant, setManualTenant] = useState('')
+  const [manualFleet,  setManualFleet]  = useState('')
+  const [manualToken,  setManualToken]  = useState('')
+  const [manualErr,    setManualErr]    = useState('')
+  const [manualSaving, setManualSaving] = useState(false)
+  const [showDisconn,  setShowDisconn]  = useState(false)
+  const [showHowTo,    setShowHowTo]    = useState(false)
+  const [realtimeOk,   setRealtimeOk]  = useState(false)
+  const [reconciling,  setReconciling] = useState(false)
 
-  // Manual complete-pairing modal
-  const [showManual,    setShowManual]    = useState(false)
-  const [manualTenant,  setManualTenant]  = useState('')
-  const [manualFleet,   setManualFleet]   = useState('')
-  const [manualToken,   setManualToken]   = useState('')
-  const [manualErr,     setManualErr]     = useState('')
-  const [manualSaving,  setManualSaving]  = useState(false)
-
-  // Disconnect confirm
-  const [showDisconn,   setShowDisconn]   = useState(false)
-
-  // ── Init ───────────────────────────────────────────────────
-  const reload = useCallback(async () => {
+  const reload = useCallback(async (reconcile = false) => {
     setLoading(true)
     try {
-      const st = await getPairingStatus()
+      let st
+      if (reconcile) {
+        setReconciling(true)
+        st = await reconcileFederationState()
+        setReconciling(false)
+      } else {
+        st = await getPairingStatus()
+      }
       setStatus(st)
       if (st === 'registered') {
         const id = await getRegisteredIdentity()
@@ -1052,14 +1058,37 @@ function FederationPanel() {
     setLoading(false)
   }, [])
 
-  useEffect(() => { reload() }, [reload])
+  useEffect(() => { reload(true) }, [reload])
 
-  // ── Live countdown ─────────────────────────────────────────
+  // Realtime federation sync
+  useEffect(() => {
+    const unsub = subscribeFederationRealtime((newStatus) => {
+      setRealtimeOk(true)
+      setStatus(newStatus)
+      if (newStatus === 'registered') {
+        getRegisteredIdentity().then(id => { setIdentity(id); setPairingCode(null) })
+      } else {
+        setIdentity(null)
+        ensurePairingCode().then(c => setPairingCode(c))
+      }
+    })
+    const t = setTimeout(() => setRealtimeOk(true), 1000)
+    return () => { unsub(); clearTimeout(t) }
+  }, [status])
+
+  // Reconcile on window focus
+  useEffect(() => {
+    const onFocus = () => reload(true)
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [reload])
+
+  // Countdown
   useEffect(() => {
     if (!pairingCode?.expiresAt) { setCountdown(''); return }
     const tick = () => {
       const rem = pairingCode.expiresAt - Date.now()
-      if (rem <= 0) { setCountdown('Expired'); return }
+      if (rem <= 0) { setCountdown('Expired'); reload(false); return }
       const m = String(Math.floor(rem / 60000)).padStart(2, '0')
       const s = String(Math.floor((rem % 60000) / 1000)).padStart(2, '0')
       setCountdown(`${m}:${s}`)
@@ -1067,46 +1096,38 @@ function FederationPanel() {
     tick()
     const id = setInterval(tick, 1000)
     return () => clearInterval(id)
-  }, [pairingCode])
+  }, [pairingCode, reload])
 
-  // ── Poll for pairing completion every 10s while pending ───
+  // Poll CC URL when pending
   useEffect(() => {
     if (status !== 'pending') return
     const ccU = getCommandCenterUrl()
     if (!ccU || !pairingCode?.code) return
     const id = setInterval(async () => {
       const res = await pollPairingStatus(ccU, pairingCode.code)
-      if (res.paired) reload()
+      if (res.paired) reload(false)
     }, 10000)
     return () => clearInterval(id)
   }, [status, pairingCode, reload])
 
-  // ── Helpers ────────────────────────────────────────────────
   const copyText = (text, key) => {
     navigator.clipboard?.writeText(text).catch(() => {})
-    setCopied(key)
-    setTimeout(() => setCopied(null), 2000)
+    setCopied(key); setTimeout(() => setCopied(null), 2000)
   }
 
   const handleRegen = async () => {
     if (!regenConfirm) { setRegenConfirm(true); return }
-    setRegenConfirm(false)
-    setRegening(true)
+    setRegenConfirm(false); setRegening(true)
     const code = await refreshPairingCode()
-    setPairingCode(code)
-    setStatus('pending')
-    setRegening(false)
+    setPairingCode(code); setStatus('pending'); setRegening(false)
   }
 
   const handleSaveCcUrl = () => {
     try {
       const saved = saveCommandCenterUrl(ccUrlInput)
-      setCcUrl(saved)
-      setCcUrlSaved(true)
+      setCcUrl(saved); setCcUrlSaved(true)
       setTimeout(() => setCcUrlSaved(false), 2000)
-    } catch (err) {
-      alert(err.message)
-    }
+    } catch (err) { alert(err.message) }
   }
 
   const handleTestConnection = async () => {
@@ -1123,41 +1144,32 @@ function FederationPanel() {
     }
     setManualSaving(true)
     await markAsRegistered(manualTenant.trim(), manualFleet.trim(), manualToken.trim())
-    if (ccUrlInput) {
-      try { saveCommandCenterUrl(ccUrlInput) } catch {}
-    }
-    setShowManual(false)
-    setManualSaving(false)
-    reload()
+    if (ccUrlInput) { try { saveCommandCenterUrl(ccUrlInput) } catch {} }
+    setShowManual(false); setManualSaving(false); reload(false)
   }
 
-  const handleDisconnect = () => {
+  const handleDisconnect = async () => {
     if (!showDisconn) { setShowDisconn(true); return }
-    disconnect()
-    setShowDisconn(false)
-    reload()
+    await disconnect(); setShowDisconn(false); reload(false)
   }
 
-  // ── Formatted code display (spaced) ───────────────────────
-  const displayCode = pairingCode?.code
-    ? pairingCode.code.split('').join(' ')
-    : '— — — —'
+  const isExpired = countdown === 'Expired' || !pairingCode?.expiresAt
+  const attempts  = parseInt(localStorage.getItem(FC_KEYS.ATTEMPTS) || '0', 10)
+  const isLocked  = attempts >= 5
 
-  // ── Status dot ────────────────────────────────────────────
   const statusDot = {
-    registered:   { color: 'bg-emerald-400', pulse: true,  label: 'Connected to Apex Command Center',  sub: 'Your fleet is live and sending telemetry', textColor: 'text-emerald-300' },
-    pending:      { color: 'bg-amber-400',   pulse: true,  label: 'Awaiting pairing in Command Center', sub: 'Enter the code below in Apex Command Center → Tenants → Register Fleet', textColor: 'text-amber-300' },
-    unregistered: { color: 'bg-slate-500',   pulse: false, label: 'Not yet registered',                sub: 'Generate a code to begin pairing with Apex Command Center', textColor: 'text-slate-400' },
+    registered:   { color: 'bg-emerald-400', pulse: true,  label: 'Connected to Apex Command Center',   sub: 'Fleet is live and syncing telemetry via Supabase',                          textColor: 'text-emerald-300' },
+    pending:      { color: 'bg-amber-400',   pulse: true,  label: 'Awaiting pairing in Command Center',  sub: 'Enter the code in Apex Command Center → Tenants → Register Fleet',          textColor: 'text-amber-300' },
+    unregistered: { color: 'bg-slate-500',   pulse: false, label: 'Not yet registered',                  sub: 'Generate a pairing code to connect this fleet',                             textColor: 'text-slate-400' },
   }[status] || { color: 'bg-slate-500', pulse: false, label: 'Unknown', sub: '', textColor: 'text-slate-400' }
-
-  // ── Collapsible how-to state ───────────────────────────────
-  const [showHowTo, setShowHowTo] = useState(false)
 
   if (loading) {
     return (
       <div className="flex items-center justify-center py-16">
         <Icon name="Loader2" size={20} className="animate-spin text-violet-400" />
-        <span className="ml-3 text-sm text-slate-500">Loading federation status…</span>
+        <span className="ml-3 text-sm text-slate-500">
+          {reconciling ? 'Reconciling federation state from Supabase…' : 'Loading federation status…'}
+        </span>
       </div>
     )
   }
@@ -1165,15 +1177,19 @@ function FederationPanel() {
   return (
     <div className="space-y-5">
 
-      {/* ── Page header ─────────────────────────────────────── */}
-      <div>
-        <h2 className="text-sm font-bold text-white">Command Center Pairing</h2>
-        <p className="text-xs text-slate-500 mt-1">
-          Connect this Fleet Control OS to Apex Command Center for live telemetry, sustainability KPIs, and unified fleet management.
-        </p>
+      {/* Header */}
+      <div className="flex items-start justify-between">
+        <div>
+          <h2 className="text-sm font-bold text-white">Command Center Pairing</h2>
+          <p className="text-xs text-slate-500 mt-1">Connect this Fleet Control OS to Apex Command Center.</p>
+        </div>
+        <div className="flex items-center gap-1.5 flex-shrink-0 ml-4">
+          <div className={`w-1.5 h-1.5 rounded-full ${realtimeOk ? 'bg-cyan-400 animate-pulse' : 'bg-slate-600'}`} />
+          <span className="text-2xs text-slate-600">{realtimeOk ? 'Realtime sync active' : 'Connecting…'}</span>
+        </div>
       </div>
 
-      {/* ── Connection status bar ────────────────────────────── */}
+      {/* Status bar */}
       <div className={`flex items-center gap-3 p-4 rounded-xl border ${
         status === 'registered' ? 'bg-emerald-500/5 border-emerald-500/20'
         : status === 'pending'  ? 'bg-amber-500/5 border-amber-500/20'
@@ -1187,254 +1203,191 @@ function FederationPanel() {
         </div>
         <div className="flex-1 min-w-0">
           <div className={`text-sm font-semibold ${statusDot.textColor}`}>{statusDot.label}</div>
-          <div className="text-2xs text-slate-500 mt-0.5 leading-relaxed">{statusDot.sub}</div>
+          <div className="text-2xs text-slate-500 mt-0.5">{statusDot.sub}</div>
         </div>
-        {status === 'registered' && (
-          <button onClick={handleDisconnect}
-            className={`flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs border transition-colors ${
-              showDisconn
-                ? 'bg-red-500/15 border-red-500/30 text-red-400'
-                : 'border-slate-700 text-slate-500 hover:text-red-400 hover:border-red-500/30'
-            }`}>
-            <Icon name={showDisconn ? 'AlertTriangle' : 'Unplug'} size={11} />
-            {showDisconn ? 'Confirm disconnect?' : 'Disconnect'}
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {status === 'registered' && (
+            <button onClick={handleDisconnect}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs border transition-colors ${
+                showDisconn ? 'bg-red-500/15 border-red-500/30 text-red-400' : 'border-slate-700 text-slate-500 hover:text-red-400 hover:border-red-500/30'
+              }`}>
+              <Icon name={showDisconn ? 'AlertTriangle' : 'Unplug'} size={11} />
+              {showDisconn ? 'Confirm?' : 'Disconnect'}
+            </button>
+          )}
+          <button onClick={() => reload(true)}
+            className="p-1.5 rounded-lg border border-slate-800 text-slate-600 hover:text-slate-400 hover:border-slate-700 transition-colors"
+            title="Reconcile from Supabase">
+            <Icon name="RefreshCw" size={11} />
           </button>
-        )}
+        </div>
       </div>
 
-      {/* ── UNREGISTERED / PENDING: Registration code card ───── */}
-      {status !== 'registered' && (
-        <div className="bg-[#0d1426] border border-violet-500/25 rounded-xl overflow-hidden">
-          {/* Header */}
-          <div className="flex items-center justify-between px-5 pt-5 pb-3">
-            <div>
-              <div className="text-2xs font-semibold text-slate-500 uppercase tracking-[0.2em]">Registration Code</div>
-              <div className="text-2xs text-slate-600 mt-0.5">Enter this in Apex Command Center → Tenants → Register Fleet</div>
-            </div>
-            {countdown && (
-              <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-2xs font-mono font-semibold border ${
-                countdown === 'Expired'
-                  ? 'bg-red-500/10 border-red-500/20 text-red-400'
-                  : 'bg-slate-900 border-slate-800 text-slate-400'
-              }`}>
-                <Icon name="Clock" size={10} />
-                {countdown === 'Expired' ? 'Expired' : `Expires in ${countdown}`}
-              </div>
-            )}
-          </div>
-
-          {/* Code display */}
-          <div className="px-5 pb-4">
-            <div className="bg-slate-950/80 border border-violet-500/15 rounded-xl px-4 py-5 text-center select-all">
-              {pairingCode?.code ? (
-                <div className="font-mono font-bold text-violet-200 text-xl sm:text-2xl tracking-[0.35em] leading-relaxed break-all">
-                  {displayCode}
-                </div>
-              ) : (
-                <div className="text-slate-600 text-sm font-mono">Generating…</div>
-              )}
-            </div>
-          </div>
-
-          {/* Action buttons */}
-          <div className="flex items-center gap-2 px-5 pb-5">
-            <button
-              onClick={() => pairingCode?.code && copyText(pairingCode.code, 'code')}
-              disabled={!pairingCode?.code}
-              className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold border transition-colors flex-1 justify-center ${
-                copied === 'code'
-                  ? 'bg-emerald-500/15 border-emerald-500/25 text-emerald-400'
-                  : 'bg-violet-500/10 border-violet-500/25 text-violet-300 hover:bg-violet-500/20 disabled:opacity-30'
-              }`}>
-              <Icon name={copied === 'code' ? 'CheckCircle2' : 'Copy'} size={12} />
-              {copied === 'code' ? 'Copied!' : 'Copy Code'}
-            </button>
-            <button
-              onClick={handleRegen}
-              disabled={regening}
-              className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold border transition-colors ${
-                regenConfirm
-                  ? 'bg-amber-500/10 border-amber-500/25 text-amber-400'
-                  : 'border-slate-700 text-slate-500 hover:text-slate-300 hover:border-slate-600'
-              }`}>
-              <Icon name={regening ? 'Loader2' : 'RefreshCw'} size={12} className={regening ? 'animate-spin' : ''} />
-              {regenConfirm ? 'Confirm?' : 'Regenerate'}
-            </button>
-            <button
-              onClick={() => setShowManual(true)}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold border border-slate-700 text-slate-500 hover:text-slate-300 hover:border-slate-600 transition-colors">
-              <Icon name="KeyRound" size={12} />
-              Enter IDs
-            </button>
-          </div>
-
-          {regenConfirm && (
-            <div className="mx-5 mb-4 flex items-start gap-2 p-3 rounded-lg bg-amber-500/5 border border-amber-500/20">
-              <Icon name="AlertTriangle" size={12} className="text-amber-400 flex-shrink-0 mt-0.5" />
-              <p className="text-2xs text-amber-300 leading-relaxed">
-                Generate a new code? The current one will be invalidated and cannot be used for pairing.
-              </p>
-            </div>
-          )}
-
-          {/* Polling indicator */}
-          {status === 'pending' && ccUrl && (
-            <div className="mx-5 mb-5 flex items-center gap-2 p-2.5 rounded-lg bg-slate-900/60 border border-slate-800/40">
-              <Icon name="Loader2" size={11} className="text-cyan-400 animate-spin flex-shrink-0" />
-              <span className="text-2xs text-slate-500">Auto-checking Command Center every 10s…</span>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ── REGISTERED: Identity panel ────────────────────────── */}
+      {/* Registered identity */}
       {status === 'registered' && identity && (
-        <div className="bg-[#0d1426] border border-emerald-500/20 rounded-xl p-5 space-y-1">
-          <div className="text-2xs font-semibold text-slate-500 uppercase tracking-wider mb-3">Fleet Identity</div>
-
+        <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-xl p-5 space-y-3">
+          <div className="flex items-center gap-2 mb-1">
+            <Icon name="CheckCircle2" size={15} className="text-emerald-400" />
+            <span className="text-sm font-semibold text-emerald-300">Fleet Registered</span>
+          </div>
           {[
-            { label: 'Tenant ID',           value: identity.tenantId,         key: 'tid'   },
-            { label: 'Fleet Entity ID',      value: identity.fleetId,          key: 'fid'   },
-            { label: 'Pairing Token',        value: identity.pairingToken,     key: 'token', mono: true, obscure: true },
-            { label: 'Command Center',       value: identity.commandCenterUrl, key: 'ccurl' },
-            { label: 'Connected Since',      value: identity.connectedSince ? new Date(identity.connectedSince).toLocaleString() : '—', key: null },
-          ].map(row => (
-            <div key={row.label} className="flex items-center justify-between py-2.5 border-b border-slate-800/40 last:border-0">
-              <div className="min-w-0 flex-1">
-                <div className="text-2xs text-slate-500 font-medium">{row.label}</div>
-                <div className={`text-xs text-white mt-0.5 truncate ${row.mono ? 'font-mono' : ''}`}>
-                  {row.obscure && row.value ? `${row.value.slice(0, 8)}••••••••${row.value.slice(-4)}` : (row.value || '—')}
-                </div>
+            { label: 'Tenant ID',  val: identity.tenantId },
+            { label: 'Fleet ID',   val: identity.fleetId },
+            { label: 'Connected',  val: identity.connectedSince ? new Date(identity.connectedSince).toLocaleString() : '—' },
+            { label: 'CC Endpoint',val: identity.commandCenterUrl || '(not set)' },
+          ].filter(r => r.val).map(({ label, val }) => (
+            <div key={label} className="flex items-center justify-between py-2 border-b border-emerald-500/10 last:border-0">
+              <span className="text-2xs text-slate-500 uppercase tracking-wider">{label}</span>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-300 font-mono truncate max-w-[200px]">{val}</span>
+                {label !== 'Connected' && (
+                  <button onClick={() => copyText(val, label)} className="text-slate-600 hover:text-slate-400">
+                    <Icon name={copied === label ? 'Check' : 'Copy'} size={11} />
+                  </button>
+                )}
               </div>
-              {row.key && row.value && (
-                <button onClick={() => copyText(row.value, row.key)}
-                  className={`ml-3 flex-shrink-0 flex items-center gap-1 px-2 py-1 rounded-lg border text-2xs transition-colors ${
-                    copied === row.key ? 'border-emerald-500/30 text-emerald-400 bg-emerald-500/8' : 'border-slate-700 text-slate-500 hover:text-slate-300'
-                  }`}>
-                  <Icon name={copied === row.key ? 'CheckCircle2' : 'Copy'} size={10} />
-                  {copied === row.key ? 'Copied' : 'Copy'}
-                </button>
-              )}
             </div>
           ))}
         </div>
       )}
 
-      {/* ── Command Center URL config ────────────────────────── */}
-      <div className="bg-[#0d1426] border border-slate-800/60 rounded-xl p-5">
-        <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Apex Command Center URL</div>
-        <div className="flex gap-2 mb-2">
-          <input
-            value={ccUrlInput}
-            onChange={e => setCcUrlInput(e.target.value)}
-            placeholder="https://your-apex-cc.vercel.app"
-            className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder-slate-700 focus:border-violet-500 focus:outline-none min-w-0"
-          />
-          <button onClick={handleSaveCcUrl}
-            className={`px-3 py-2 rounded-xl text-xs font-semibold border flex-shrink-0 transition-colors flex items-center gap-1.5 ${
-              ccUrlSaved ? 'bg-emerald-500/15 border-emerald-500/25 text-emerald-400' : 'bg-slate-700/60 border-slate-700 text-white hover:bg-slate-700'
+      {/* Pairing code */}
+      {status !== 'registered' && (
+        <div className="bg-slate-900/60 border border-slate-800/60 rounded-xl p-5 space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-xs font-semibold text-white">Pairing Code</div>
+              <div className="text-2xs text-slate-600 mt-0.5">Saved to Supabase · Expires in 60 min · Max 5 attempts</div>
+            </div>
+            <div className="flex items-center gap-2">
+              {pairingCode?.expiresAt && !isExpired && (
+                <div className="flex items-center gap-1 text-2xs text-slate-500">
+                  <Icon name="Clock" size={10} />{countdown}
+                </div>
+              )}
+              {isExpired && <span className="text-2xs text-red-400 flex items-center gap-1"><Icon name="AlertCircle" size={10} />Expired</span>}
+              {isLocked && <span className="text-2xs text-red-400 flex items-center gap-1"><Icon name="Lock" size={10} />Locked ({attempts}/5)</span>}
+            </div>
+          </div>
+
+          <div className={`bg-slate-950 border rounded-xl p-4 flex items-center justify-between gap-3 ${
+            isExpired || isLocked ? 'border-red-500/20 opacity-60' : 'border-slate-700/60'
+          }`}>
+            <span className={`font-mono text-sm tracking-widest select-all ${isExpired || isLocked ? 'text-slate-600' : 'text-cyan-300'}`}>
+              {pairingCode?.code || '—'}
+            </span>
+            <button
+              onClick={() => pairingCode?.code && copyText(pairingCode.code, 'code')}
+              disabled={!pairingCode?.code || isExpired || isLocked}
+              className="flex-shrink-0 p-2 rounded-lg border border-slate-700 text-slate-500 hover:text-slate-200 hover:border-slate-600 disabled:opacity-30 transition-colors">
+              <Icon name={copied === 'code' ? 'Check' : 'Copy'} size={13} />
+            </button>
+          </div>
+
+          <p className="text-2xs text-slate-700 text-center font-mono">APEX-[A-Z0-9]{"{8}"}-[A-Z0-9]{"{4}"}-FC</p>
+
+          <button onClick={handleRegen} disabled={regening}
+            className={`w-full py-2.5 rounded-xl border text-xs font-semibold transition-all flex items-center justify-center gap-2 disabled:opacity-40 ${
+              regenConfirm ? 'border-amber-500/30 bg-amber-500/10 text-amber-400' : 'border-slate-700 bg-slate-800/60 text-slate-400 hover:text-slate-200'
             }`}>
-            <Icon name={ccUrlSaved ? 'CheckCircle2' : 'Save'} size={11} />
-            {ccUrlSaved ? 'Saved' : 'Save'}
-          </button>
-          <button onClick={handleTestConnection} disabled={ccTestState === 'testing'}
-            className={`px-3 py-2 rounded-xl text-xs font-semibold border flex-shrink-0 transition-colors flex items-center gap-1.5 ${
-              ccTestState === 'ok'      ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-400'
-              : ccTestState === 'fail' ? 'bg-red-500/10 border-red-500/25 text-red-400'
-              : ccTestState === 'testing' ? 'border-slate-700 text-slate-400'
-              : 'border-slate-700 text-slate-400 hover:text-white'
-            }`}>
-            <Icon name={ccTestState === 'testing' ? 'Loader2' : ccTestState === 'ok' ? 'Wifi' : ccTestState === 'fail' ? 'WifiOff' : 'Zap'}
-              size={11} className={ccTestState === 'testing' ? 'animate-spin' : ''} />
-            {ccTestState === 'testing' ? 'Testing…' : ccTestState === 'ok' ? 'Connected' : ccTestState === 'fail' ? 'Unreachable' : 'Test'}
+            {regening ? <><Icon name="Loader2" size={12} className="animate-spin" />Generating…</>
+            : regenConfirm ? <><Icon name="AlertTriangle" size={12} />Confirm regenerate?</>
+            : <><Icon name="RefreshCw" size={12} />Regenerate Code</>}
           </button>
         </div>
-        <p className="text-2xs text-slate-700">Must start with https:// · no trailing slash · used for all API endpoints</p>
+      )}
+
+      {/* CC URL */}
+      <div className="bg-slate-900/40 border border-slate-800/60 rounded-xl p-4 space-y-3">
+        <div className="text-xs font-semibold text-white">Command Center URL</div>
+        <div className="flex gap-2">
+          <input type="url" value={ccUrlInput} onChange={e => setCcUrlInput(e.target.value)}
+            placeholder="https://command.apex.ai"
+            className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-600 focus:border-cyan-500/60 focus:outline-none font-mono" />
+          <button onClick={handleTestConnection} disabled={ccTestState === 'testing'}
+            className={`px-3 py-2 rounded-lg border text-xs font-semibold transition-colors flex items-center gap-1.5 flex-shrink-0 ${
+              ccTestState === 'ok'   ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400' :
+              ccTestState === 'fail' ? 'border-red-500/30 bg-red-500/10 text-red-400' :
+              'border-slate-700 text-slate-400 hover:text-slate-200'
+            }`}>
+            {ccTestState === 'testing' ? <Icon name="Loader2" size={11} className="animate-spin" />
+            : ccTestState === 'ok'     ? <Icon name="CheckCircle2" size={11} />
+            : ccTestState === 'fail'   ? <Icon name="XCircle" size={11} />
+            : <Icon name="Wifi" size={11} />}
+            {ccTestState === 'ok' ? 'Online' : ccTestState === 'fail' ? 'Offline' : 'Test'}
+          </button>
+          <button onClick={handleSaveCcUrl}
+            className={`px-3 py-2 rounded-lg border text-xs font-semibold transition-colors flex-shrink-0 ${
+              ccUrlSaved ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400' : 'border-cyan-500/30 bg-cyan-500/10 text-cyan-400'
+            }`}>
+            {ccUrlSaved ? <Icon name="Check" size={11} /> : <Icon name="Save" size={11} />}
+          </button>
+        </div>
       </div>
 
-      {/* ── How to pair (collapsible) ────────────────────────── */}
-      <div className="bg-[#0d1426] border border-slate-800/60 rounded-xl overflow-hidden">
-        <button onClick={() => setShowHowTo(v => !v)}
-          className="w-full flex items-center justify-between px-5 py-4 hover:bg-slate-900/30 transition-colors">
-          <div className="flex items-center gap-2">
-            <Icon name="HelpCircle" size={14} className="text-cyan-400" />
-            <span className="text-xs font-semibold text-white">How to pair with Apex Command Center</span>
+      {/* Manual pairing */}
+      <div>
+        <button onClick={() => setShowManual(p => !p)}
+          className="flex items-center gap-2 text-xs text-slate-600 hover:text-slate-400 transition-colors">
+          <Icon name={showManual ? 'ChevronUp' : 'ChevronDown'} size={12} />
+          Manual pairing (advanced)
+        </button>
+        {showManual && (
+          <div className="mt-3 bg-slate-900/40 border border-slate-800/60 rounded-xl p-4 space-y-3">
+            <p className="text-2xs text-slate-600">Enter credentials provided by Apex Command Center manually.</p>
+            {[
+              { label: 'Tenant ID',    val: manualTenant, set: setManualTenant, ph: 'TENANT-…' },
+              { label: 'Fleet ID',     val: manualFleet,  set: setManualFleet,  ph: 'FE-…' },
+              { label: 'Pairing Token',val: manualToken,  set: setManualToken,  ph: 'Pairing token from Command Center' },
+            ].map(({ label, val, set, ph }) => (
+              <div key={label} className="space-y-1">
+                <label className="text-2xs text-slate-500 uppercase tracking-wider">{label}</label>
+                <input type="text" value={val} onChange={e => set(e.target.value)} placeholder={ph}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-600 focus:border-violet-500/60 focus:outline-none font-mono" />
+              </div>
+            ))}
+            {manualErr && (
+              <div className="text-2xs text-red-400 flex items-center gap-1.5">
+                <Icon name="AlertCircle" size={11} />{manualErr}
+              </div>
+            )}
+            <button onClick={handleManualPair} disabled={manualSaving}
+              className="w-full py-2 rounded-lg border border-violet-500/30 bg-violet-500/10 text-violet-400 text-xs font-semibold hover:bg-violet-500/15 disabled:opacity-40 transition-colors flex items-center justify-center gap-2">
+              {manualSaving ? <><Icon name="Loader2" size={11} className="animate-spin" />Saving…</> : 'Complete Pairing'}
+            </button>
           </div>
-          <Icon name={showHowTo ? 'ChevronUp' : 'ChevronDown'} size={13} className="text-slate-500" />
+        )}
+      </div>
+
+      {/* How it works */}
+      <div>
+        <button onClick={() => setShowHowTo(p => !p)}
+          className="flex items-center gap-2 text-xs text-slate-600 hover:text-slate-400 transition-colors">
+          <Icon name={showHowTo ? 'ChevronUp' : 'ChevronDown'} size={12} />
+          How federation pairing works
         </button>
         {showHowTo && (
-          <div className="px-5 pb-5 space-y-3 border-t border-slate-800/40">
+          <div className="mt-3 bg-slate-900/40 border border-slate-800/60 rounded-xl p-4 space-y-2">
             {[
-              { n: 1, text: 'Copy your registration code using the button above' },
-              { n: 2, text: 'Open Apex Command Center OS in your browser' },
-              { n: 3, text: 'Go to Tenants → Register Fleet' },
-              { n: 4, text: 'Paste your code and complete the fleet details form' },
-              { n: 5, text: 'Command Center will display Tenant ID, Fleet ID, and Pairing Token — paste them back using the "Enter IDs" button, or wait for auto-detection (requires CC URL configured above)' },
-            ].map(s => (
-              <div key={s.n} className="flex items-start gap-3">
-                <div className="w-5 h-5 rounded-full bg-violet-500/15 border border-violet-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
-                  <span className="text-2xs font-bold text-violet-400">{s.n}</span>
-                </div>
-                <p className="text-xs text-slate-400 leading-relaxed">{s.text}</p>
+              ['1', 'A pairing code is generated and saved to Supabase (60 min TTL, 5-attempt lock)'],
+              ['2', 'In Apex Command Center → Tenants → Register Fleet, enter the code'],
+              ['3', 'Command Center validates format: APEX-[A-Z0-9]{8}-[A-Z0-9]{4}-FC'],
+              ['4', 'On acceptance, Supabase realtime notifies this panel automatically'],
+              ['5', 'Fleet node registered — telemetry, KPIs, and dispatch sync live'],
+            ].map(([n, txt]) => (
+              <div key={n} className="flex gap-3">
+                <span className="text-2xs font-bold text-violet-400 flex-shrink-0 w-4">{n}</span>
+                <span className="text-2xs text-slate-500">{txt}</span>
               </div>
             ))}
           </div>
         )}
       </div>
 
-      {/* ── Manual complete-pairing modal ────────────────────── */}
-      {showManual && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-[#0d1426] border border-slate-800/60 rounded-xl w-full max-w-md">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800/60">
-              <div>
-                <div className="text-sm font-semibold text-white">Enter Pairing Credentials</div>
-                <div className="text-2xs text-slate-500 mt-0.5">Copy from Apex Command Center after registering your fleet</div>
-              </div>
-              <button onClick={() => setShowManual(false)} className="text-slate-500 hover:text-white p-1">
-                <Icon name="X" size={15} />
-              </button>
-            </div>
-            <div className="p-5 space-y-4">
-              {[
-                { label: 'Tenant ID',    placeholder: 'TENANT-…', val: manualTenant, set: setManualTenant },
-                { label: 'Fleet ID',     placeholder: 'FE-… or fleet_…', val: manualFleet, set: setManualFleet },
-                { label: 'Pairing Token', placeholder: 'Provided by Command Center', val: manualToken, set: setManualToken },
-              ].map(f => (
-                <div key={f.label} className="space-y-1.5">
-                  <label className="text-2xs text-slate-500 font-medium block">{f.label}</label>
-                  <input value={f.val} onChange={e => f.set(e.target.value)} placeholder={f.placeholder}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder-slate-700 focus:border-violet-500 focus:outline-none" />
-                </div>
-              ))}
-              {manualErr && (
-                <div className="flex items-center gap-2 text-xs text-red-400">
-                  <Icon name="AlertCircle" size={12} />
-                  {manualErr}
-                </div>
-              )}
-              <div className="flex gap-3 pt-1">
-                <button onClick={() => setShowManual(false)} className="flex-1 px-4 py-2 rounded-xl border border-slate-700 text-slate-400 text-xs font-semibold hover:text-white transition-colors">Cancel</button>
-                <button onClick={handleManualPair} disabled={manualSaving}
-                  className="flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-violet-500/15 border border-violet-500/25 text-violet-300 text-xs font-semibold hover:bg-violet-500/25 transition-colors disabled:opacity-40">
-                  <Icon name={manualSaving ? 'Loader2' : 'Link'} size={12} className={manualSaving ? 'animate-spin' : ''} />
-                  {manualSaving ? 'Saving…' : 'Complete Pairing'}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
     </div>
   )
 }
 
-// ─── Settings Page ────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────
-// Backend Configuration Panel — Supabase Live Mode
-// ─────────────────────────────────────────────────────────────
 function BackendPanel() {
   const stored = getSupabaseSettings()
   const [url,        setUrl]        = useState(stored.url || '')

@@ -34,11 +34,14 @@ function genULID() {
 function genTenantId()      { return `TENANT-${genULID()}` }
 function genFleetEntityId() { return `FE-${genULID()}` }
 function genRegistrationCode() {
-  // APEX-XXXXXXXX-XXXX-FC format — compatible with Apex Command Center validation
-  // regex: /^APEX-[A-F0-9]{8}-[A-F0-9]{4}-[A-Z]{2,4}$/
-  const a = crypto.randomUUID().replace(/-/g, '').substring(0, 8).toUpperCase()
-  const b = crypto.randomUUID().replace(/-/g, '').substring(0, 4).toUpperCase()
-  return `APEX-\${a}-\${b}-FC`
+  // APEX-XXXXXXXX-XXXX-FC format
+  // regex: /^APEX-[A-Z0-9]{8}-[A-Z0-9]{4}-FC$/
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+  const seg = (len) => Array.from(
+    { length: len },
+    (_, i) => chars[Math.floor(Math.random() * chars.length)]
+  ).join('')
+  return `APEX-${seg(8)}-${seg(4)}-FC`
 }
 
 // ─── Install fingerprint (non-cryptographic, stable per browser) ─
