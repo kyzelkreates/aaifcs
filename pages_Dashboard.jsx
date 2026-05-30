@@ -39,6 +39,7 @@ import {
   getLiveDriverPositions,
 } from './services_sync_liveSync'
 import { runSyncVerification, SYNC_HEALTH } from './services_sync_syncVerificationService'
+import { subscribeToDashboardEvents } from './services_backend_backendService'
 
 
 const ApexMap = lazy(() => import('./modules_navigation_ApexMap'))
@@ -1061,8 +1062,12 @@ function DriverAppSummaryCard({ drivers }) {
 
 // ─── Sync Verification Hook ───────────────────────────────────
 /**
- * useSyncVerification — polls Supabase every 30s for real data flow.
- * READ ONLY. Safe — never throws, never writes.
+ * useSyncVerification — hybrid realtime + polling Supabase data-flow check.
+ *
+ * Realtime path  : subscribeToDashboardEvents fires instantly on every INSERT.
+ * Polling path   : runSyncVerification() every 30s catches driver_locations
+ *                  and tasks updates that are not in dashboard_events.
+ * Both paths are READ ONLY. Safe — never throws, never writes.
  */
 function useSyncVerification() {
   const [syncState, setSyncState] = useState({
@@ -1076,12 +1081,15 @@ function useSyncVerification() {
     sources:            null,
     error:              null,
     loading:            true,
+    liveUpdates:        0,        // count of realtime inserts received this session
   })
 
+  // ── Full verification poll (covers all three table sources) ───
   const runCheck = useCallback(async () => {
     try {
       const result = await runSyncVerification()
-      setSyncState({
+      setSyncState(prev => ({
+        ...prev,
         supabaseReady:      result.supabaseReady,
         health:             result.health,
         lastEventType:      result.lastEventType,
@@ -1092,17 +1100,49 @@ function useSyncVerification() {
         sources:            result.sources,
         error:              result.error,
         loading:            false,
-      })
+      }))
     } catch {
       setSyncState(prev => ({ ...prev, loading: false }))
     }
   }, [])
 
+  // ── Realtime: instant update on every dashboard_events INSERT ─
   useEffect(() => {
+    // Run an initial poll immediately
     runCheck()
-    // Poll every 30s — aligned with the dashboard refresh cadence
+
+    // Subscribe to dashboard_events realtime (READ ONLY)
+    const unsub = subscribeToDashboardEvents((row) => {
+      if (!row) return
+      const ts = row.created_at || new Date().toISOString()
+      const { health, ageLabel } = { health: SYNC_HEALTH.LIVE, ageLabel: 'just now' }
+      setSyncState(prev => ({
+        ...prev,
+        supabaseReady:      true,
+        health,
+        lastEventType:      row.type      ?? prev.lastEventType,
+        lastEventSource:    row.payload?.source ?? 'fleet_os',
+        lastEventTimestamp: ts,
+        ageLabel,
+        preview:            row.payload
+                              ? Object.keys(row.payload).slice(0,3)
+                                  .map(k => `${k}: ${String(row.payload[k]).slice(0,20)}`)
+                                  .join(' · ')
+                              : null,
+        sources:            prev.sources ?? ['dashboard_events'],
+        error:              null,
+        loading:            false,
+        liveUpdates:        prev.liveUpdates + 1,
+      }))
+    })
+
+    // Poll every 30s for driver_locations + tasks (not in dashboard_events stream)
     const id = setInterval(runCheck, 30_000)
-    return () => clearInterval(id)
+
+    return () => {
+      unsub()
+      clearInterval(id)
+    }
   }, [runCheck])
 
   return { ...syncState, refresh: runCheck }
@@ -1119,7 +1159,7 @@ function useSyncVerification() {
  */
 function SyncStatusPanel() {
   const { supabaseReady, health, lastEventType, lastEventSource,
-          lastEventTimestamp, ageLabel, preview, sources, error, loading, refresh } = useSyncVerification()
+          lastEventTimestamp, ageLabel, preview, sources, error, loading, liveUpdates, refresh } = useSyncVerification()
 
   // Don't render if Supabase is not set up at all
   if (!supabaseReady && !loading) return null
@@ -1193,6 +1233,14 @@ function SyncStatusPanel() {
           <div className="flex items-center gap-1.5 ml-auto">
             <Icon name="Database" size={10} className="text-slate-700" />
             <span className="text-2xs text-slate-700">{sources.join(' · ')}</span>
+          </div>
+        )}
+
+        {/* Live update counter — shows realtime inserts received this session */}
+        {liveUpdates > 0 && (
+          <div className="flex items-center gap-1.5">
+            <Icon name="Zap" size={10} className="text-cyan-600" />
+            <span className="text-2xs font-mono text-cyan-700">{liveUpdates} live</span>
           </div>
         )}
       </div>

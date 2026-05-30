@@ -727,3 +727,46 @@ export async function setSetting(key, value) {
   if (error) { console.error('[AP3X:Backend] setSetting:', error); return { ok: false, error: error.message } }
   return { ok: true, data }
 }
+
+
+// ═══════════════════════════════════════════════════════════════
+// DASHBOARD EVENTS — REALTIME SUBSCRIPTION (READ ONLY)
+// Enables Fleet OS to receive live inserts from dashboard_events.
+// Matches the exact pattern of subscribeToTasks / subscribeToDrivers.
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Subscribe to dashboard_events table via Supabase Realtime.
+ * Fires callback with the raw INSERT payload on every new event.
+ * Falls back gracefully when Supabase is not configured.
+ *
+ * READ ONLY — no writes triggered.
+ *
+ * @param {function} callback — called with the new dashboard_events row
+ * @returns {function} unsubscribe
+ */
+export function subscribeToDashboardEvents(callback) {
+  if (!isLiveMode()) return () => {}
+  const sb = getSupabaseClient()
+  if (!sb) return () => {}
+
+  const channel = sb
+    .channel('ap3x-dashboard-events')
+    .on(
+      'postgres_changes',
+      { event: 'INSERT', schema: 'public', table: 'dashboard_events' },
+      (payload) => {
+        try { callback(payload.new) } catch {}
+      }
+    )
+    .subscribe(s => {
+      if (s === 'SUBSCRIBED')    setStatus('connected')
+      if (s === 'CHANNEL_ERROR') setStatus('sync_delayed')
+    })
+
+  registerChannel('dashboard-events', channel)
+  return () => {
+    try { sb.removeChannel(channel) } catch {}
+    _channels.delete('dashboard-events')
+  }
+}

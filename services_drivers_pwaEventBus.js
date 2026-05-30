@@ -36,12 +36,19 @@
  */
 
 import { SYNC_CHANNEL } from './services_sync_liveSync'
+import { getSupabaseClient, isSupabaseReady } from './services_supabase_supabaseClient'
 
 // ─── Constants ────────────────────────────────────────────────
 const OFFLINE_QUEUE_KEY  = 'apex:pwa:event_queue'
 const MAX_QUEUE_SIZE     = 200          // max queued events (FIFO drop oldest)
 const MAX_RETRY_ATTEMPTS = 3
 const RETRY_BASE_DELAY   = 300          // ms — doubles per retry (300, 600, 1200)
+
+// Supabase emit retry constants
+const SB_MAX_RETRIES      = 3
+const SB_RETRY_BASE_DELAY = 400   // ms — doubles per retry (400, 800, 1600)
+const SB_OFFLINE_KEY      = 'apex:pwa:sb_event_queue'
+const SB_MAX_QUEUE        = 150
 
 // Valid event types the Driver PWA is allowed to emit (sensor-node contract)
 const ALLOWED_EVENT_TYPES = new Set([
@@ -374,11 +381,20 @@ if (typeof window !== 'undefined') {
   const _FLUSH_LISTENER_KEY = '__apex_pwa_flush_attached'
   if (!window[_FLUSH_LISTENER_KEY]) {
     window.addEventListener('online', () => {
-      const depth = getOfflineQueueDepth()
-      if (depth > 0) {
-        _log('ONLINE', `Connection restored — auto-flushing ${depth} queued event(s)`)
+      // Flush BroadcastChannel offline queue
+      const bcDepth = getOfflineQueueDepth()
+      if (bcDepth > 0) {
+        _log('ONLINE', `Connection restored — auto-flushing ${bcDepth} BC queued event(s)`)
         flushOfflineQueue().then(({ flushed, failed }) => {
-          _log('ONLINE', `Auto-flush complete — flushed: ${flushed}, failed: ${failed}`)
+          _log('ONLINE', `BC auto-flush: flushed=${flushed}, failed=${failed}`)
+        }).catch(() => {})
+      }
+      // Flush Supabase offline queue
+      const sbDepth = getSupabaseQueueDepth()
+      if (sbDepth > 0) {
+        _log('ONLINE', `Connection restored — auto-flushing ${sbDepth} Supabase queued event(s)`)
+        flushSupabaseQueue().then(({ flushed, failed }) => {
+          _log('ONLINE', `SB auto-flush: flushed=${flushed}, failed=${failed}`)
         }).catch(() => {})
       }
     })
@@ -386,8 +402,178 @@ if (typeof window !== 'undefined') {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// SUPABASE EMIT PATH — Driver PWA → Supabase dashboard_events
+// ═══════════════════════════════════════════════════════════════
+// This is the REALTIME-COMPATIBLE emit path.
+// Inserts a validated event row into dashboard_events so Supabase
+// Realtime can propagate it to Fleet OS subscribers.
+//
+// Schema used (existing, append-only):
+//   dashboard_events: { id (uuid, auto), type, payload (jsonb), created_at (auto) }
+//
+// CONTRACT:
+//   - Driver PWA is the INSERT source only — no reads, no updates, no deletes
+//   - Event format: { type, source: "driver_pwa", timestamp, payload }
+//     stored as: type = event.type, payload = full event object
+//   - Falls back to offline queue if Supabase unavailable
+//   - Auto-flushes queue on reconnect (window 'online' event)
+// ═══════════════════════════════════════════════════════════════
+
+// ── Supabase offline queue helpers ───────────────────────────
+const _readSbQueue  = () => { try { return JSON.parse(localStorage.getItem(SB_OFFLINE_KEY) || '[]') } catch { return [] } }
+const _writeSbQueue = (q) => { try { localStorage.setItem(SB_OFFLINE_KEY, JSON.stringify(q)) } catch {} }
+
+/**
+ * Queue an event for Supabase delivery when offline.
+ * Separate queue from BroadcastChannel queue (different delivery path).
+ */
+function _queueForSupabase(event) {
+  try {
+    const q = _readSbQueue()
+    q.push({ ...event, _sb_queued_at: Date.now() })
+    const trimmed = q.length > SB_MAX_QUEUE ? q.slice(q.length - SB_MAX_QUEUE) : q
+    _writeSbQueue(trimmed)
+    _log('SB_QUEUE', `Queued for Supabase: type="${event.type}" — depth: ${trimmed.length}`)
+    return true
+  } catch (e) {
+    _log('SB_QUEUE', 'Failed to queue for Supabase', e?.message)
+    return false
+  }
+}
+
+/**
+ * Low-level: insert a single validated event into dashboard_events.
+ * Returns { ok: boolean, error?: string }.
+ * Never throws.
+ */
+async function _insertToDashboardEvents(event) {
+  try {
+    if (!isSupabaseReady()) {
+      return { ok: false, error: 'Supabase not configured' }
+    }
+    const sb = getSupabaseClient()
+    if (!sb) return { ok: false, error: 'No Supabase client' }
+
+    // Row format: type = event.type, payload = full event object (includes source + timestamp)
+    const { error } = await sb
+      .from('dashboard_events')
+      .insert({ type: event.type, payload: event })
+
+    if (error) return { ok: false, error: error.message }
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e?.message ?? 'Unknown insert error' }
+  }
+}
+
+/**
+ * Insert with exponential backoff retry.
+ * SB_MAX_RETRIES attempts: 400ms, 800ms, 1600ms.
+ */
+async function _insertWithRetry(event) {
+  let lastError = ''
+  for (let attempt = 1; attempt <= SB_MAX_RETRIES; attempt++) {
+    const result = await _insertToDashboardEvents(event)
+    if (result.ok) {
+      if (attempt > 1) _log('SB_RETRY', `Supabase insert succeeded on attempt ${attempt} for type="${event.type}"`)
+      return { ok: true, attempts: attempt }
+    }
+    lastError = result.error
+    _log('SB_RETRY', `Attempt ${attempt}/${SB_MAX_RETRIES} failed for type="${event.type}": ${lastError}`)
+    if (attempt < SB_MAX_RETRIES) {
+      await new Promise(r => setTimeout(r, SB_RETRY_BASE_DELAY * Math.pow(2, attempt - 1)))
+    }
+  }
+  return { ok: false, attempts: SB_MAX_RETRIES, error: lastError }
+}
+
+/**
+ * Flush Supabase offline queue.
+ * Retries each queued event via _insertWithRetry.
+ * Called automatically on window 'online' event.
+ * Returns { flushed: number, failed: number }.
+ */
+export async function flushSupabaseQueue() {
+  const q = _readSbQueue()
+  if (q.length === 0) return { flushed: 0, failed: 0 }
+
+  _log('SB_FLUSH', `Flushing ${q.length} queued Supabase event(s)`)
+  let flushed = 0
+  const remaining = []
+
+  for (const event of q) {
+    const result = await _insertWithRetry(event)
+    if (result.ok) {
+      flushed++
+      _log('SB_FLUSH', `Flushed type="${event.type}" (was queued ${Math.round((Date.now() - (event._sb_queued_at || 0)) / 1000)}s ago)`)
+    } else {
+      remaining.push(event)
+    }
+  }
+
+  _writeSbQueue(remaining)
+  _log('SB_FLUSH', `SB flush done — flushed: ${flushed}, remaining: ${remaining.length}`)
+  return { flushed, failed: remaining.length }
+}
+
+/**
+ * Get current Supabase offline queue depth.
+ */
+export function getSupabaseQueueDepth() {
+  return _readSbQueue().length
+}
+
+/**
+ * Primary Supabase emit method.
+ * Validates the event, inserts into dashboard_events with retry.
+ * If offline or all retries fail → queues to localStorage for later flush.
+ *
+ * This is the realtime-compatible path:
+ *   Driver PWA → dashboard_events INSERT → Supabase Realtime → Fleet OS
+ *
+ * @param {object} rawEvent - { type, payload, [timestamp] }
+ * @param {object} [options] - { skipQueue: boolean }
+ * @returns {Promise<{ ok: boolean, event, queued: boolean, error?: string }>}
+ */
+export async function supabaseEmit(rawEvent, options = {}) {
+  // Validate + normalise using the existing validateEvent (same format contract)
+  const { ok: valid, event, errors } = validateEvent(rawEvent)
+
+  if (!event) {
+    _log('SB_EMIT', 'Dropping malformed event — cannot normalise', errors)
+    return { ok: false, event: null, errors, queued: false }
+  }
+
+  // Offline check
+  const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false
+  if (isOffline && !options.skipQueue) {
+    _log('SB_EMIT', `Offline — queuing Supabase emit for type="${event.type}"`)
+    _queueForSupabase(event)
+    return { ok: false, event, errors, queued: true }
+  }
+
+  // Attempt insert with retry
+  const result = await _insertWithRetry(event)
+
+  if (result.ok) {
+    _log('SB_EMIT', `✓ Inserted to dashboard_events: type="${event.type}" (${result.attempts} attempt${result.attempts > 1 ? 's' : ''})`)
+    return { ok: true, event, errors, queued: false }
+  }
+
+  // All retries failed — queue for later
+  if (!options.skipQueue) {
+    _log('SB_EMIT', `All retries failed for type="${event.type}" — queuing for Supabase flush`)
+    _queueForSupabase(event)
+    return { ok: false, event, errors, queued: true, error: result.error }
+  }
+
+  return { ok: false, event, errors, queued: false, error: result.error }
+}
+
 // ─── Default export (namespace) ──────────────────────────────
 export const pwaEventBus = {
+  // BroadcastChannel path (same-device / cross-tab)
   validateEvent,
   safeEmit,
   queueOfflineEvent,
@@ -403,6 +589,10 @@ export const pwaEventBus = {
   emitBreakStart,
   emitBreakEnd,
   emitHazardReport,
+  // Supabase path (cross-device realtime → Fleet OS)
+  supabaseEmit,
+  flushSupabaseQueue,
+  getSupabaseQueueDepth,
 }
 
 export default pwaEventBus
