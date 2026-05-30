@@ -232,15 +232,22 @@ export const fleetLearning = {
   },
 
   getFleetStats() {
-    const obj = readObj(LS_KEYS.FLEET_STATS)
-    const total = (obj.jobs_completed || 0) + (obj.jobs_failed || 0)
+    const obj  = readObj(LS_KEYS.FLEET_STATS)
+    const done = Math.max(0, parseInt(obj.jobs_completed, 10) || 0)
+    const fail = Math.max(0, parseInt(obj.jobs_failed,    10) || 0)
+    const total = done + fail
+    // successRate: null when no recorded jobs (UI renders "—")
+    // Never returns NaN — explicit guard.
+    const successRate = total > 0
+      ? Math.min(100, Math.max(0, Math.round((done / total) * 100)))
+      : null
     return {
-      jobsCompleted:    obj.jobs_completed   || 0,
-      jobsFailed:       obj.jobs_failed      || 0,
-      totalKm:          obj.total_km         || 0,
-      alertsGenerated:  obj.alerts_generated || 0,
-      successRate:      total > 0 ? Math.round((obj.jobs_completed / total) * 100) : null,
-      lastUpdated:      obj.last_updated     || null,
+      jobsCompleted:   done,
+      jobsFailed:      fail,
+      totalKm:         Math.max(0, parseFloat(obj.total_km) || 0),
+      alertsGenerated: Math.max(0, parseInt(obj.alerts_generated, 10) || 0),
+      successRate,
+      lastUpdated:     obj.last_updated || null,
     }
   },
 

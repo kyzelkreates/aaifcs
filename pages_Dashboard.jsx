@@ -1084,22 +1084,30 @@ export default function Dashboard() {
 
   useEffect(() => { load() }, [load])
 
-  // Live telemetry → refresh vehicle positions
+  // Live telemetry → update vehicle positions in store (NO full reload).
+  // telemetryService.subscribeToAll already calls useFleetStore.updateTelemetry internally.
+  // A full load() on every GPS tick causes cascading Supabase fetches — avoided here.
+  // The 15s interval below is the correct cadence for full data refresh.
   useEffect(() => {
-    const unsub = telemetryService.subscribeToAll(() => load())
+    const unsub = telemetryService.subscribeToAll(() => {
+      // Telemetry is already pushed into useFleetStore by the service itself.
+      // No load() needed here — vehicle positions update reactively via the store.
+    })
     return () => unsub?.()
-  }, [load])
+  }, [])
 
-  // Also subscribe to vehicle/driver changes
+  // Subscribe to structural changes (new vehicles / drivers added or removed).
+  // These are low-frequency — a full load() is appropriate.
   useEffect(() => {
     const u1 = fleetService.subscribeToVehicles(() => load())
     const u2 = driverService.subscribeToDrivers(() => load())
     return () => { u1?.(); u2?.() }
   }, [load])
 
-  // Auto-refresh every 15s
+  // Full data refresh every 30s — balanced cadence for live fleet operations.
+  // 15s was too aggressive when Supabase is the backend (doubles request rate).
   useEffect(() => {
-    const id = setInterval(load, 15000)
+    const id = setInterval(load, 30000)
     return () => clearInterval(id)
   }, [load])
 
@@ -1113,7 +1121,14 @@ export default function Dashboard() {
   const avgScore       = drivers.length
     ? Math.round(drivers.reduce((s, d) => s + (d.safety_score || 0), 0) / drivers.length) : null
 
-  // ── Apex Intelligence KPIs (lazy — computed once on load) ───
+  // ── Apex Intelligence KPIs ─────────────────────────────────
+  // Recompute when vehicle/driver DATA changes, not just count changes.
+  // Stable fingerprint: join vehicle ids+status+fuel and driver ids+score.
+  // This avoids stale KPIs when records update in-place (same count, new values).
+  const vehicleFingerprint = vehicles.map(v => `${v.id}:${v.status}:${v.fuel_level ?? ''}`).join('|')
+  const driverFingerprint  = drivers.map(d => `${d.id}:${d.safety_score ?? ''}:${d.status}`).join('|')
+  const alertFingerprint   = alerts.length
+
   const [intelKPIs, setIntelKPIs] = useState(null)
   useEffect(() => {
     try {
@@ -1123,8 +1138,11 @@ export default function Dashboard() {
       const safetyKPIs   = safetyEngine.getFleetSafetyKPIs(vehicles, drivers)
       const riskDrivers  = driverLearning.rankByRisk(drivers.map(d => d.id).filter(Boolean)).filter(d => d.riskScore > 60)
       setIntelKPIs({ fleetStats, intelligence, compScore, safetyKPIs, riskDrivers })
-    } catch {}
-  }, [vehicles.length, drivers.length, alerts.length])
+    } catch (err) {
+      console.warn('[Dashboard] intelKPIs compute error:', err.message)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vehicleFingerprint, driverFingerprint, alertFingerprint])
 
   const mapMarkers = vehicles
     .filter(v => v.lat && v.lng)

@@ -190,18 +190,32 @@ export const safetyEngine = {
       }
     }
 
-    // ── 9. Driver Stress Indicators ───────────────────────
+    // ── 9. Driver Stress Indicators ─────────────────────
     if (driver?.id) {
       const stressData = this.getDriverStressState(driver.id)
+
+      // Derive a live fatigue score from available session data.
+      // Priority: explicit hours_today/session_hours field on driver record
+      // → stored stress state (updated by Driver PWA events via Federation OS).
+      // Rule: 9h = EU standard daily limit = 100 score. Linear scale, clamped 0-100.
+      const sessionH = parseFloat(driver.hours_today ?? driver.session_hours ?? 0)
+      const liveFatigueScore = sessionH > 0
+        ? Math.min(100, Math.round((sessionH / 9) * 100))
+        : (stressData.fatigueScore || 0)
+
       if (stressData.harshEventRate > 3) {
         risks.push({ type: 'driver_stress', severity: 'moderate',
           msg: `Driver has ${stressData.harshEventRate.toFixed(1)} harsh events/100km this week.` })
         riskScore += 10
       }
-      if (stressData.fatigueScore > 70) {
+      if (liveFatigueScore > 70) {
         risks.push({ type: 'driver_fatigue', severity: 'high',
-          msg: `Driver fatigue score is ${stressData.fatigueScore}/100 — consider reassigning.` })
+          msg: `Driver fatigue score is ${liveFatigueScore}/100 — consider reassigning.` })
         riskScore += 20
+      } else if (liveFatigueScore > 50) {
+        risks.push({ type: 'driver_fatigue', severity: 'moderate',
+          msg: `Driver fatigue score is ${liveFatigueScore}/100 — monitor closely.` })
+        riskScore += 8
       }
     }
 
@@ -322,6 +336,36 @@ export const safetyEngine = {
   },
 
   /**
+   * Derive a rule-based fatigue score (0-100) from session hours.
+   * Aligns with EU drivers' hours regulations.
+   *
+   * 0h   → 0   (fresh)
+   * 4.5h → 50  (mandatory break threshold — moderate fatigue)
+   * 9h   → 100 (EU standard daily limit)
+   * >9h  → 100 (capped)
+   *
+   * @param {number} sessionHours — hours driven/on-duty this shift
+   * @returns {{ fatigueScore: number, fatigueRisk: string, breaksNeeded: number }}
+   */
+  computeFatigueScore(sessionHours = 0) {
+    const h = Math.max(0, parseFloat(sessionHours) || 0)
+    const fatigueScore = Math.min(100, Math.round((h / 9) * 100))
+    const fatigueRisk  = h > 10  ? 'critical'
+                       : h > 9   ? 'high'
+                       : h > 7   ? 'moderate'
+                       : h > 4.5 ? 'low'
+                       : 'none'
+    return {
+      fatigueScore,
+      fatigueRisk,
+      sessionHours:   Math.round(h * 10) / 10,
+      remainingLegalH: Math.max(0, Math.round((9 - h) * 10) / 10),
+      breaksNeeded:   Math.floor(h / 4.5),
+      euLimitH:       9,
+    }
+  },
+
+  /**
    * Get or update driver stress state in localStorage.
    */
   getDriverStressState(driverId) {
@@ -348,8 +392,13 @@ export const safetyEngine = {
     const vehicleIssues = vehicles.map(v => this.analyseVehicle(v))
     const criticalVehicles = vehicleIssues.filter(a => a.criticalCount > 0).length
     const highRiskVehicles  = vehicleIssues.filter(a => a.riskLevel === RISK_LEVEL.HIGH || a.riskLevel === RISK_LEVEL.CRITICAL).length
+    // Average overallRisk across vehicles, then invert to safety score.
+    // Clamp to 0-100 — high overallRisk on any single vehicle can push average above 100.
+    const avgRisk = vehicleIssues.length > 0
+      ? vehicleIssues.reduce((s, a) => s + Math.min(100, a.overallRisk), 0) / vehicleIssues.length
+      : 0
     const fleetSafetyScore = vehicleIssues.length > 0
-      ? Math.round(100 - (vehicleIssues.reduce((s, a) => s + a.overallRisk, 0) / vehicleIssues.length))
+      ? Math.max(0, Math.min(100, Math.round(100 - avgRisk)))
       : 100
 
     return {

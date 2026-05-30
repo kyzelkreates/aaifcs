@@ -54,10 +54,13 @@ export const safetyService = {
     alertTable.delete(id)
   },
 
-  // Evaluate a telemetry packet and auto-generate alerts
+  // Evaluate a telemetry packet and auto-generate alerts.
+  // Rule-based only — no AI calls. Reads from telemetry payload fields.
   evaluateTelemetry(telemetry) {
     const alerts = []
-    if (telemetry.speed > 90) {
+
+    // ── Speeding ────────────────────────────────────────────
+    if (telemetry.speed != null && telemetry.speed > 90) {
       alerts.push(this.createAlert({
         type:        ALERT_TYPE.SPEEDING,
         severity:    telemetry.speed > 110 ? ALERT_SEVERITY.CRITICAL : ALERT_SEVERITY.HIGH,
@@ -69,16 +72,48 @@ export const safetyService = {
         resolved:    false,
       }))
     }
+
+    // ── Low fuel ────────────────────────────────────────────
     if (telemetry.fuel != null && telemetry.fuel < 10) {
       alerts.push(this.createAlert({
         type:        ALERT_TYPE.MAINTENANCE,
         severity:    ALERT_SEVERITY.MEDIUM,
         driver_id:   telemetry.driver_id,
         vehicle_id:  telemetry.vehicle_id,
+        driver_name: telemetry.driver_name,
+        vehicle_reg: telemetry.vehicle_reg,
         description: `Low fuel: ${telemetry.fuel}%`,
         resolved:    false,
       }))
     }
+
+    // ── Fatigue (rule-based) ─────────────────────────────────
+    // Triggered when telemetry payload carries fatigue_score or session_hours.
+    // Fleet OS reads this — does NOT write source data; fatigue_score comes
+    // from the Driver PWA via Federation OS sync payload (syncPayload.js).
+    const fatigueScore  = telemetry.fatigue_score  ?? null
+    const sessionHours  = telemetry.session_hours  ?? null
+
+    // Derive score from session_hours if explicit score not present
+    const derivedScore = fatigueScore != null
+      ? fatigueScore
+      : sessionHours != null
+        ? Math.min(100, Math.round((parseFloat(sessionHours) / 9) * 100))
+        : null
+
+    if (derivedScore != null && derivedScore > 70) {
+      alerts.push(this.createAlert({
+        type:        ALERT_TYPE.FATIGUE,
+        severity:    derivedScore > 85 ? ALERT_SEVERITY.CRITICAL : ALERT_SEVERITY.HIGH,
+        driver_id:   telemetry.driver_id,
+        vehicle_id:  telemetry.vehicle_id,
+        driver_name: telemetry.driver_name,
+        vehicle_reg: telemetry.vehicle_reg,
+        description: `Fatigue alert: score ${derivedScore}/100${sessionHours != null ? ` (${parseFloat(sessionHours).toFixed(1)}h session)` : ''}`,
+        resolved:    false,
+      }))
+    }
+
     return alerts
   },
 
