@@ -38,6 +38,7 @@ import {
   sendFleetMessage, sendFleetAlert, sendDispatchOrder,
   getLiveDriverPositions,
 } from './services_sync_liveSync'
+import { runSyncVerification, SYNC_HEALTH } from './services_sync_syncVerificationService'
 
 
 const ApexMap = lazy(() => import('./modules_navigation_ApexMap'))
@@ -1058,6 +1059,162 @@ function DriverAppSummaryCard({ drivers }) {
   )
 }
 
+// ─── Sync Verification Hook ───────────────────────────────────
+/**
+ * useSyncVerification — polls Supabase every 30s for real data flow.
+ * READ ONLY. Safe — never throws, never writes.
+ */
+function useSyncVerification() {
+  const [syncState, setSyncState] = useState({
+    supabaseReady:      false,
+    health:             SYNC_HEALTH.UNKNOWN,
+    lastEventType:      null,
+    lastEventSource:    null,
+    lastEventTimestamp: null,
+    ageLabel:           '—',
+    preview:            null,
+    sources:            null,
+    error:              null,
+    loading:            true,
+  })
+
+  const runCheck = useCallback(async () => {
+    try {
+      const result = await runSyncVerification()
+      setSyncState({
+        supabaseReady:      result.supabaseReady,
+        health:             result.health,
+        lastEventType:      result.lastEventType,
+        lastEventSource:    result.lastEventSource,
+        lastEventTimestamp: result.lastEventTimestamp,
+        ageLabel:           result.ageLabel,
+        preview:            result.latestEvent?.preview ?? null,
+        sources:            result.sources,
+        error:              result.error,
+        loading:            false,
+      })
+    } catch {
+      setSyncState(prev => ({ ...prev, loading: false }))
+    }
+  }, [])
+
+  useEffect(() => {
+    runCheck()
+    // Poll every 30s — aligned with the dashboard refresh cadence
+    const id = setInterval(runCheck, 30_000)
+    return () => clearInterval(id)
+  }, [runCheck])
+
+  return { ...syncState, refresh: runCheck }
+}
+
+// ─── Sync Status Panel Component ──────────────────────────────
+/**
+ * SyncStatusPanel — non-intrusive diagnostic row.
+ * Shows Supabase sync health, last event type, and data age.
+ * Renders nothing if Supabase is not configured (local mode).
+ *
+ * Placement: below Intel KPI strip, above empty-state / main grid.
+ * Design: matches existing dark-theme card style exactly.
+ */
+function SyncStatusPanel() {
+  const { supabaseReady, health, lastEventType, lastEventSource,
+          lastEventTimestamp, ageLabel, preview, sources, error, loading, refresh } = useSyncVerification()
+
+  // Don't render if Supabase is not set up at all
+  if (!supabaseReady && !loading) return null
+
+  const HEALTH_CONFIG = {
+    [SYNC_HEALTH.LIVE]:    { label: 'LIVE',    dot: 'bg-emerald-400', pulse: true,  color: 'text-emerald-400', border: 'border-emerald-500/15', bg: 'bg-emerald-500/5' },
+    [SYNC_HEALTH.DELAYED]: { label: 'DELAYED', dot: 'bg-amber-400',   pulse: false, color: 'text-amber-400',   border: 'border-amber-500/15',   bg: 'bg-amber-500/5'   },
+    [SYNC_HEALTH.STALE]:   { label: 'STALE',   dot: 'bg-red-400',     pulse: false, color: 'text-red-400',     border: 'border-red-500/15',     bg: 'bg-red-500/5'     },
+    [SYNC_HEALTH.UNKNOWN]: { label: 'UNKNOWN', dot: 'bg-slate-600',   pulse: false, color: 'text-slate-500',   border: 'border-slate-800/60',   bg: 'bg-slate-900/40'  },
+  }
+  const cfg = HEALTH_CONFIG[health] ?? HEALTH_CONFIG[SYNC_HEALTH.UNKNOWN]
+
+  return (
+    <div className="bg-[#0d1426] border border-slate-800/60 rounded-xl p-4">
+      {/* Panel header */}
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <Icon name="Radio" size={13} className="text-slate-600" />
+          <span className="text-sm font-semibold text-white">Sync Verification</span>
+        </div>
+        <button
+          onClick={refresh}
+          disabled={loading}
+          title="Re-check sync"
+          className="w-6 h-6 flex items-center justify-center rounded-md bg-slate-900 border border-slate-800 text-slate-600 hover:text-slate-300 transition-colors">
+          <Icon name="RefreshCw" size={11} className={loading ? 'animate-spin' : ''} />
+        </button>
+      </div>
+
+      {/* Status row */}
+      <div className="flex flex-wrap items-center gap-3">
+
+        {/* Sync Health Badge */}
+        <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border ${cfg.bg} ${cfg.border}`}>
+          <span className="relative flex h-2 w-2">
+            {cfg.pulse && <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${cfg.dot} opacity-60`} />}
+            <span className={`relative inline-flex rounded-full h-2 w-2 ${cfg.dot}`} />
+          </span>
+          <span className={`text-xs font-bold font-mono ${cfg.color}`}>{cfg.label}</span>
+        </div>
+
+        {/* Last Event Received */}
+        <div className="flex items-center gap-1.5">
+          <Icon name="Clock" size={11} className="text-slate-600" />
+          <span className="text-2xs text-slate-500">Last event:</span>
+          <span className="text-2xs font-mono text-slate-300">
+            {loading ? '…' : (ageLabel ?? '—')}
+          </span>
+        </div>
+
+        {/* Last Event Type */}
+        {lastEventType && lastEventType !== 'UNKNOWN' && (
+          <div className="flex items-center gap-1.5">
+            <Icon name="Tag" size={11} className="text-slate-600" />
+            <span className="text-2xs text-slate-500">Type:</span>
+            <span className="text-2xs font-mono text-cyan-400">{lastEventType}</span>
+          </div>
+        )}
+
+        {/* Source */}
+        {lastEventSource && lastEventSource !== 'unknown' && (
+          <div className="flex items-center gap-1.5">
+            <Icon name="Cpu" size={11} className="text-slate-600" />
+            <span className="text-2xs text-slate-500">Source:</span>
+            <span className="text-2xs font-mono text-slate-400">{lastEventSource}</span>
+          </div>
+        )}
+
+        {/* Sources checked */}
+        {sources && sources.length > 0 && (
+          <div className="flex items-center gap-1.5 ml-auto">
+            <Icon name="Database" size={10} className="text-slate-700" />
+            <span className="text-2xs text-slate-700">{sources.join(' · ')}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Payload preview — only show when health is not LIVE (diagnostic context) */}
+      {preview && health !== SYNC_HEALTH.LIVE && (
+        <div className="mt-2.5 px-3 py-2 rounded-lg bg-slate-900/60 border border-slate-800/40">
+          <span className="text-2xs text-slate-600 font-mono break-all">{preview}</span>
+        </div>
+      )}
+
+      {/* Error state */}
+      {error && !loading && (
+        <div className="mt-2 flex items-center gap-2 text-2xs text-amber-400">
+          <Icon name="AlertCircle" size={10} />
+          <span>{error}</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function Dashboard() {
   const navigate = useNavigate()
   const { vehicles } = useFleetStore(s => ({ vehicles: s.vehicles }))
@@ -1258,6 +1415,12 @@ export default function Dashboard() {
             </div>
           </div>
         )}
+
+        {/* ── Sync Verification Panel ─────────────────────────────
+             Read-only Supabase data-flow diagnostic. Shows last
+             received event, type, source, and sync health.
+             Renders nothing when Supabase is not configured.     */}
+        <SyncStatusPanel />
 
         {/* Empty state OR main grid */}
         {isEmpty ? (
