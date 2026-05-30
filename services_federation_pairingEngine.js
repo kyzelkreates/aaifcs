@@ -96,7 +96,7 @@ async function sbInsertCode(code, expiresAt) {
         attempts:  0,
         expires_at: new Date(expiresAt).toISOString(),
         metadata:  { version: '1.0', generated_at: new Date().toISOString() },
-      }, { onConflict: 'code', ignoreDuplicates: false })
+      }, { onConflict: 'code' })
       .select('id')
       .single()
     if (error) throw error
@@ -468,13 +468,18 @@ export function subscribeFederationRealtime(onStateChange) {
       { event: '*', schema: 'public', table: 'pairing_codes' },
       (payload) => {
         const row = payload.new || payload.old
-        if (!row || row.code !== code) return  // only care about our code
+        if (!row) return
+
+        // Read code LIVE from cache on every event — prevents stale-closure
+        // mismatches after refreshPairingCode() replaces the active code.
+        const activeCode = lsGet(FC_KEYS.CODE)
+        if (!activeCode || row.code !== activeCode) return  // not our code
 
         const status = row.status
         if (status === 'accepted') {
           // Remote system accepted our code — mark registered
           if (row.tenant_id && row.fleet_id) {
-            const token = lsGet(FC_KEYS.PAIRING_TOKEN) || row.tenant_id  // fallback
+            const token = lsGet(FC_KEYS.PAIRING_TOKEN) || row.pairing_token || ''
             markAsRegistered(row.tenant_id, row.fleet_id, token)
               .then(() => onStateChange?.('registered'))
           }
