@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@googlemaps/js-api-loader": "^2.0.2",
     "@supabase/supabase-js": "^2.39.0",
     "clsx": "^2.1.0",
     "leaflet": "^1.9.4",

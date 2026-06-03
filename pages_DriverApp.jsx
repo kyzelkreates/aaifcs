@@ -42,6 +42,7 @@ import { aiRouter }   from './services_ai_aiRouter'
 import { mapService }   from './services_maps_mapService'
 import { routeCache }  from './services_routing_routeCache'
 import { getRuntimeKey, RUNTIME_KEYS } from './services_maps_runtimeKeys'
+import { Loader as GoogleMapsLoader } from '@googlemaps/js-api-loader'
 import { loadGraphHopperKey, getLocalRoutingConstraints } from './services_settings_appSettingsService'
 import {
   subscribeFederationRealtime, reconcileFederationState,
@@ -802,6 +803,14 @@ function DriverAppMain({ profile, onLogout }) {
   // break the browser's user-gesture trust chain on mobile browsers.
   // We attach the handler directly to the DOM node via useEffect.
   const [isFullscreen, setIsFullscreen] = useState(false)
+
+  // ── Google Maps 3D render layer state ────────────────────────
+  const [mapRenderMode,   setMapRenderMode]   = useState('leaflet')  // 'leaflet' | 'google'
+  const [googleMapsReady, setGoogleMapsReady] = useState(false)
+  const googleMapDivRef   = useRef(null)
+  const googleMapInstRef  = useRef(null)
+  const googlePolylineRef = useRef(null)
+  const googleMarkerRef   = useRef(null)
   const appRef = useRef(null)
   const fsButtonRef  = useRef(null)   // attached to the topbar FS button
   const wakeLockRef  = useRef(null)   // Screen Wake Lock — prevents sleep during navigation
@@ -905,7 +914,146 @@ function DriverAppMain({ profile, onLogout }) {
     return () => btn.removeEventListener('click', handler)
   }, [])
 
-  // ── Fleet link code state ───────────────────────────────────
+  // ── Google Maps 3D — init when mode switches to 'google' ────
+  // Routing data comes from GraphHopper/OSRM (already in `route` state).
+  // Google Maps is DISPLAY ONLY — renders the polyline + truck marker + 3D tilt.
+  useEffect(() => {
+    if (mapRenderMode !== 'google') return
+    if (!pos) return
+
+    const apiKey = getRuntimeKey(RUNTIME_KEYS.GOOGLE_MAPS)
+    if (!apiKey) {
+      console.warn('[DriverApp] Google Maps API key not set — falling back to Leaflet')
+      setMapRenderMode('leaflet')
+      return
+    }
+
+    let cancelled = false
+    const init = async () => {
+      try {
+        const loader = new GoogleMapsLoader({
+          apiKey,
+          version: 'weekly',
+          libraries: ['maps', 'marker'],
+        })
+        const { Map: GMap } = await loader.importLibrary('maps')
+        if (cancelled) return
+
+        // Wait for the div ref to be available (React may not have committed yet)
+        let retries = 0
+        while (!googleMapDivRef.current && retries < 20) {
+          await new Promise(r => setTimeout(r, 100))
+          retries++
+        }
+        if (!googleMapDivRef.current || cancelled) return
+
+        const mapInst = new GMap(googleMapDivRef.current, {
+          center:            { lat: pos[0], lng: pos[1] },
+          zoom:              17,
+          tilt:              45,           // 3D perspective
+          heading:           0,
+          mapTypeId:         'roadmap',
+          disableDefaultUI:  true,
+          gestureHandling:   'greedy',
+          backgroundColor:   '#060b18',
+          mapId:             'DEMO_MAP_ID',  // required for advanced markers; replace with real ID if available
+        })
+
+        googleMapInstRef.current = mapInst
+        setGoogleMapsReady(true)
+
+        // Truck marker using standard Marker (AdvancedMarkerElement needs map ID provisioning)
+        const truckMarker = new google.maps.Marker({
+          position:  { lat: pos[0], lng: pos[1] },
+          map:       mapInst,
+          icon: {
+            path:        google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
+            scale:       7,
+            fillColor:   '#a78bfa',
+            fillOpacity: 1,
+            strokeColor: '#ffffff',
+            strokeWeight: 1.5,
+            rotation:    0,
+          },
+          title: 'Your vehicle',
+          zIndex: 999,
+        })
+        googleMarkerRef.current = truckMarker
+      } catch (err) {
+        console.error('[DriverApp] Google Maps init failed:', err.message)
+        if (!cancelled) setMapRenderMode('leaflet')
+      }
+    }
+
+    init()
+    return () => { cancelled = true }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapRenderMode])
+
+  // ── Google Maps — sync GPS position + heading to truck marker ─
+  useEffect(() => {
+    if (!googleMapsReady || !googleMapInstRef.current || !pos) return
+    const latlng = { lat: pos[0], lng: pos[1] }
+
+    // Update marker position + heading
+    if (googleMarkerRef.current) {
+      googleMarkerRef.current.setPosition(latlng)
+      googleMarkerRef.current.setIcon({
+        path:        google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
+        scale:       7,
+        fillColor:   '#a78bfa',
+        fillOpacity: 1,
+        strokeColor: '#ffffff',
+        strokeWeight: 1.5,
+        rotation:    heading ?? 0,
+      })
+    }
+
+    // Pan + tilt map to follow truck (Google Maps 3D style)
+    if (follow) {
+      googleMapInstRef.current.moveCamera({
+        center:  latlng,
+        heading: heading ?? 0,
+        tilt:    45,
+        zoom:    17,
+      })
+    }
+  }, [pos, heading, follow, googleMapsReady])
+
+  // ── Google Maps — draw route polyline when route state changes ─
+  useEffect(() => {
+    if (!googleMapsReady || !googleMapInstRef.current || !route?.length) return
+
+    // Remove old polyline
+    if (googlePolylineRef.current) {
+      googlePolylineRef.current.setMap(null)
+      googlePolylineRef.current = null
+    }
+
+    const path = route.map(([lat, lng]) => ({ lat, lng }))
+    const poly = new google.maps.Polyline({
+      path,
+      geodesic:     true,
+      strokeColor:  '#00d4ff',
+      strokeOpacity: 0.9,
+      strokeWeight:  5,
+      map:          googleMapInstRef.current,
+    })
+    googlePolylineRef.current = poly
+  }, [route, googleMapsReady])
+
+  // ── Google Maps — cleanup on unmount or mode switch ───────────
+  useEffect(() => {
+    return () => {
+      if (googleMarkerRef.current)  { googleMarkerRef.current.setMap(null);  googleMarkerRef.current = null }
+      if (googlePolylineRef.current){ googlePolylineRef.current.setMap(null); googlePolylineRef.current = null }
+      googleMapInstRef.current = null
+      setGoogleMapsReady(false)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapRenderMode])
+
+  // ── Fleet link code state ───────────────────────────────────────
   const [showFleetConnect, setShowFleetConnect] = useState(false)
   const [fleetLinkCode,    setFleetLinkCode]    = useState('')
   const [fleetLinkError,   setFleetLinkError]   = useState('')
@@ -1810,7 +1958,7 @@ function DriverAppMain({ profile, onLogout }) {
       {tab === 'map' && (
         <div className="flex-1 relative overflow-hidden">
 
-          {/* Step instruction panel */}
+          {/* ── Step instruction HUD ──────────────────────────── */}
           {currentStep && !showSearch && (
             <div className="absolute top-2 left-2 right-2 z-[1000]">
               <div className="flex items-center gap-3 bg-[#0a0f1e]/95 backdrop-blur border border-violet-500/30 rounded-xl px-3 py-2.5 shadow-xl">
@@ -1837,6 +1985,9 @@ function DriverAppMain({ profile, onLogout }) {
                   <span className="text-2xs text-cyan-400 tabular-nums">{fmtDist(routeInfo.distance)}</span>
                   <span className="text-2xs text-slate-600">·</span>
                   <span className="text-2xs text-violet-400 tabular-nums">{fmtDur(routeInfo.duration)}</span>
+                  <span className="text-2xs text-slate-600 ml-1 font-mono">
+                    {routeProvider === 'graphhopper' ? '● GH' : routeProvider === 'google' ? '● GMaps' : '● OSM'}
+                  </span>
                   <button onClick={clearRoute} className="text-slate-600 hover:text-red-400 ml-1">
                     <Icon name="X" size={12} />
                   </button>
@@ -1857,48 +2008,46 @@ function DriverAppMain({ profile, onLogout }) {
             </div>
           )}
 
-          {/* Search overlay */}
-          {showSearch || (!currentStep && !destination) ? (
+          {/* ── Search overlay ─────────────────────────────────── */}
+          {(showSearch || (!currentStep && !destination)) && (
             <div className="absolute top-2 left-2 right-2 z-[1001]">
-              {showSearch || !destination ? (
-                <div className="bg-[#0d1426]/98 backdrop-blur border border-violet-500/25 rounded-xl shadow-2xl overflow-hidden">
-                  <div className="flex items-center gap-2 px-3 py-2.5">
-                    <Icon name="Search" size={13} className="text-violet-400 flex-shrink-0" />
-                    <input autoFocus value={searchQ} onChange={e => setSearchQ(e.target.value)}
-                      onKeyDown={e => e.key === 'Enter' && doSearch()}
-                      placeholder="Search destination…"
-                      className="flex-1 bg-transparent text-sm text-white placeholder-slate-600 focus:outline-none" />
-                    {searching
-                      ? <Icon name="Loader2" size={13} className="text-violet-400 animate-spin" />
-                      : searchQ.trim()
-                        ? <button onClick={doSearch}><Icon name="ArrowRight" size={13} className="text-violet-400" /></button>
-                        : null}
-                    {showSearch && (
-                      <button onClick={() => { setShowSearch(false); setSearchRes([]) }} className="ml-1">
-                        <Icon name="X" size={13} className="text-slate-500" />
-                      </button>
-                    )}
-                  </div>
-                  {searchRes.length > 0 && (
-                    <div className="border-t border-slate-800/60 max-h-60 overflow-y-auto">
-                      {searchRes.map((r, i) => (
-                        <button key={i} onClick={() => selectDest(r)}
-                          className="w-full text-left flex items-start gap-2 px-3 py-2.5 hover:bg-violet-500/10 border-b border-slate-800/30 last:border-0 transition-colors">
-                          <Icon name="MapPin" size={12} className="text-violet-400 mt-0.5 flex-shrink-0" />
-                          <div>
-                            <div className="text-xs text-white line-clamp-1">{r.display_name.split(',').slice(0, 2).join(', ')}</div>
-                            <div className="text-2xs text-slate-600 line-clamp-1">{r.display_name.split(',').slice(2, 5).join(', ')}</div>
-                          </div>
-                        </button>
-                      ))}
-                    </div>
+              <div className="bg-[#0d1426]/98 backdrop-blur border border-violet-500/25 rounded-xl shadow-2xl overflow-hidden">
+                <div className="flex items-center gap-2 px-3 py-2.5">
+                  <Icon name="Search" size={13} className="text-violet-400 flex-shrink-0" />
+                  <input autoFocus value={searchQ} onChange={e => setSearchQ(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && doSearch()}
+                    placeholder="Search destination…"
+                    className="flex-1 bg-transparent text-sm text-white placeholder-slate-600 focus:outline-none" />
+                  {searching
+                    ? <Icon name="Loader2" size={13} className="text-violet-400 animate-spin" />
+                    : searchQ.trim()
+                      ? <button onClick={doSearch}><Icon name="ArrowRight" size={13} className="text-violet-400" /></button>
+                      : null}
+                  {showSearch && (
+                    <button onClick={() => { setShowSearch(false); setSearchRes([]) }} className="ml-1">
+                      <Icon name="X" size={13} className="text-slate-500" />
+                    </button>
                   )}
                 </div>
-              ) : null}
+                {searchRes.length > 0 && (
+                  <div className="border-t border-slate-800/60 max-h-60 overflow-y-auto">
+                    {searchRes.map((r, i) => (
+                      <button key={i} onClick={() => selectDest(r)}
+                        className="w-full text-left flex items-start gap-2 px-3 py-2.5 hover:bg-violet-500/10 border-b border-slate-800/30 last:border-0 transition-colors">
+                        <Icon name="MapPin" size={12} className="text-violet-400 mt-0.5 flex-shrink-0" />
+                        <div>
+                          <div className="text-xs text-white line-clamp-1">{r.display_name.split(',').slice(0, 2).join(', ')}</div>
+                          <div className="text-2xs text-slate-600 line-clamp-1">{r.display_name.split(',').slice(2, 5).join(', ')}</div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
-          ) : null}
+          )}
 
-          {/* Routing spinner */}
+          {/* ── Routing spinner ────────────────────────────────── */}
           {routing && (
             <div className="absolute top-2 left-1/2 -translate-x-1/2 z-[1002] flex items-center gap-2 bg-[#0d1426]/95 border border-violet-500/25 rounded-xl px-4 py-2">
               <Icon name="Loader2" size={13} className="text-violet-400 animate-spin" />
@@ -1906,32 +2055,42 @@ function DriverAppMain({ profile, onLogout }) {
             </div>
           )}
 
-          {/* Leaflet map */}
+          {/* ══ MAP RENDER — Google Maps 3D (if key present) or Leaflet/OSM ══ */}
           {pos ? (
-            <MapContainer center={pos} zoom={16} style={{ width: '100%', height: '100%' }} zoomControl={false}>
-              <TileLayer
-                attribution='&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors'
-                url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-              />
-              {/* Reactive polylines — imperative Leaflet for reliable re-rendering */}
-              <LivePolylines route={route} stopRoutes={stopRoutes} />
-              {/* 🚛 Driver position — truck follows polyline */}
-              <Marker position={pos} icon={DRIVER_ICON} />
-              {/* GPS accuracy ring */}
-              {accuracy && accuracy < 200 && (
-                <Circle center={pos} radius={accuracy}
-                  pathOptions={{ color: '#a78bfa', fillColor: '#a78bfa', fillOpacity: 0.05, weight: 1, dashArray: '4 4' }} />
-              )}
-              {/* Job stop markers (numbered) — shown when job is active with stops */}
-              {jobStops.length > 0
-                ? jobStops.map((stop, i) => (
-                    <Marker key={`stop-${i}`} position={[stop.lat, stop.lng]} icon={makeStopIcon(stop.idx)} />
-                  ))
-                : destination && <Marker position={destination} icon={DEST_ICON} />
-              }
-              {/* Map follow controller */}
-              <MapController pos={pos} follow={follow} zoom={16} />
-            </MapContainer>
+            mapRenderMode === 'google' && googleMapsReady ? (
+              /* ── Google Maps 3D render layer ──────────────────── */
+              <div ref={googleMapDivRef} className="w-full h-full absolute inset-0" />
+            ) : (
+              /* ── Leaflet / OSM fallback (always works, no key needed) ── */
+              <MapContainer
+                key="leaflet-map"
+                center={[
+                  pos[0] != null && isFinite(pos[0]) ? pos[0] : 51.5074,
+                  pos[1] != null && isFinite(pos[1]) ? pos[1] : -0.1278,
+                ]}
+                zoom={16}
+                style={{ width: '100%', height: '100%' }}
+                zoomControl={false}
+              >
+                <TileLayer
+                  attribution='&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a>'
+                  url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                />
+                <LivePolylines route={route} stopRoutes={stopRoutes} />
+                <Marker position={pos} icon={DRIVER_ICON} />
+                {accuracy && accuracy < 200 && (
+                  <Circle center={pos} radius={accuracy}
+                    pathOptions={{ color: '#a78bfa', fillColor: '#a78bfa', fillOpacity: 0.05, weight: 1, dashArray: '4 4' }} />
+                )}
+                {jobStops.length > 0
+                  ? jobStops.map((stop, i) => (
+                      <Marker key={`stop-${i}`} position={[stop.lat, stop.lng]} icon={makeStopIcon(stop.idx)} />
+                    ))
+                  : destination && <Marker position={destination} icon={DEST_ICON} />
+                }
+                <MapController pos={pos} follow={follow} zoom={16} />
+              </MapContainer>
+            )
           ) : (
             <div className="flex flex-col items-center justify-center h-full gap-3">
               {gpsState === 'denied' ? (
@@ -1949,25 +2108,43 @@ function DriverAppMain({ profile, onLogout }) {
             </div>
           )}
 
-          {/* Map overlay controls */}
+          {/* ── Map overlay controls ────────────────────────────── */}
           <div className="absolute right-3 bottom-28 z-[1000] flex flex-col gap-2">
-            {/* Fullscreen toggle — native listener via mapFsBtnRef */}
+            {/* Map mode toggle — Google Maps 3D ↔ Leaflet/OSM */}
             <button
-              ref={mapFsBtnRef}
+              onClick={() => setMapRenderMode(m => m === 'google' ? 'leaflet' : 'google')}
+              title={mapRenderMode === 'google' ? 'Switch to OSM map' : 'Switch to Google Maps 3D'}
+              className={`w-10 h-10 rounded-xl border shadow-lg flex items-center justify-center transition-colors ${
+                mapRenderMode === 'google'
+                  ? 'bg-blue-500/20 border-blue-500/40 text-blue-400'
+                  : 'bg-[#0d1426]/90 border-slate-700 text-slate-500 hover:border-violet-500/40 hover:text-violet-400'
+              }`}>
+              <Icon name="Globe" size={15} />
+            </button>
+            {/* Fullscreen toggle */}
+            <button ref={mapFsBtnRef}
               className="w-10 h-10 rounded-xl border shadow-lg flex items-center justify-center transition-colors bg-[#0d1426]/90 border-slate-700 text-slate-400 hover:border-violet-500/40 hover:text-violet-400"
               title={isFullscreen ? 'Exit fullscreen (Esc)' : 'Fullscreen'}>
               <Icon name={isFullscreen ? 'Minimize2' : 'Maximize2'} size={16} />
             </button>
-            {/* Follow toggle */}
-            <button onClick={() => setFollow(f => !f)}
-              className={`w-10 h-10 rounded-xl border shadow-lg flex items-center justify-center transition-colors ${
-                follow ? 'bg-violet-500/25 border-violet-500/50 text-violet-400' : 'bg-[#0d1426]/90 border-slate-700 text-slate-500'
-              }`}>
-              <Icon name="Crosshair" size={16} />
+            {/* Follow toggle (Leaflet only) */}
+            {mapRenderMode !== 'google' && (
+              <button onClick={() => setFollow(f => !f)}
+                className={`w-10 h-10 rounded-xl border shadow-lg flex items-center justify-center transition-colors ${
+                  follow ? 'bg-violet-500/25 border-violet-500/50 text-violet-400' : 'bg-[#0d1426]/90 border-slate-700 text-slate-500'
+                }`}>
+                <Icon name="Crosshair" size={16} />
+              </button>
+            )}
+            {/* Hazard report button */}
+            <button onClick={() => { setTab('safety'); setSafetyScreen('hazards') }}
+              title="Report a hazard"
+              className="w-10 h-10 rounded-xl border shadow-lg flex items-center justify-center transition-colors bg-amber-500/12 border-amber-500/30 text-amber-400 hover:bg-amber-500/20">
+              <Icon name="AlertTriangle" size={15} />
             </button>
           </div>
 
-          {/* Bottom HUD */}
+          {/* ── Bottom HUD ─────────────────────────────────────── */}
           <div className="absolute bottom-3 left-3 right-3 z-[1000] flex items-end justify-between pointer-events-none">
             {/* Speed + trip */}
             <div className="flex flex-col gap-1">
@@ -1982,10 +2159,27 @@ function DriverAppMain({ profile, onLogout }) {
               </div>
             </div>
 
-            {/* OSM attribution */}
+            {/* Centre HUD: fatigue + heading */}
+            <div className="flex flex-col items-center gap-1 pointer-events-none">
+              <div className={`flex items-center gap-1 px-3 py-1.5 rounded-xl border text-xs font-mono ${fatigueBorder}`}>
+                <Icon name="Eye" size={10} className={fatigueColor} />
+                <span className={`font-bold ${fatigueColor}`}>{fatigueScore}%</span>
+                <span className="text-slate-700 text-2xs">fatigue</span>
+              </div>
+              {heading != null && (
+                <div className="bg-[#0d1426]/80 border border-slate-800/50 rounded-lg px-2 py-1">
+                  <span className="text-2xs text-slate-600 font-mono">{heading}° {bearingLabel(heading)}</span>
+                </div>
+              )}
+            </div>
+
+            {/* Attribution */}
             <div className="pointer-events-auto">
-              <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer"
-                className="text-2xs text-slate-700 hover:text-slate-500">© OpenStreetMap</a>
+              {mapRenderMode === 'google' && googleMapsReady
+                ? <span className="text-2xs text-slate-700">© Google</span>
+                : <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer"
+                    className="text-2xs text-slate-700 hover:text-slate-500">© OpenStreetMap</a>
+              }
             </div>
           </div>
         </div>

@@ -194,6 +194,8 @@ function CenterUpdater({ center, zoom }) {
 
   useEffect(() => {
     if (!center) return
+    if (center.lat == null || center.lng == null) return
+    if (!isFinite(center.lat) || !isFinite(center.lng)) return
     const key = `${center.lat},${center.lng}`
     if (key === prevCenter.current) return
     prevCenter.current = key
@@ -225,7 +227,12 @@ const ApexMap = forwardRef(function ApexMap({
     setZoom:   s.setZoom
   }))
 
-  const mapCenter = center || storeCenter || { lat: 51.5074, lng: -0.1278 }
+  // Guard: ensure mapCenter always has valid finite numbers — Leaflet crashes on NaN/null
+  const rawCenter = center || storeCenter || { lat: 51.5074, lng: -0.1278 }
+  const mapCenter = {
+    lat: (rawCenter?.lat != null && isFinite(rawCenter.lat)) ? rawCenter.lat : 51.5074,
+    lng: (rawCenter?.lng != null && isFinite(rawCenter.lng)) ? rawCenter.lng : -0.1278,
+  }
   const mapZoom   = zoom  || storeZoom   || 11
   const tileUrl   = resolveTileUrl(provider)
 
@@ -241,8 +248,11 @@ const ApexMap = forwardRef(function ApexMap({
   return (
     <div className={`relative overflow-hidden ${className}`} style={{ height }}>
       <MapContainer
-        center={[mapCenter.lat, mapCenter.lng]}
-        zoom={mapZoom}
+        center={[
+          isFinite(mapCenter.lat) ? mapCenter.lat : 51.5074,
+          isFinite(mapCenter.lng) ? mapCenter.lng : -0.1278,
+        ]}
+        zoom={isFinite(mapZoom) ? mapZoom : 11}
         className="w-full h-full"
         zoomControl={false}
         attributionControl={false}
@@ -266,7 +276,7 @@ const ApexMap = forwardRef(function ApexMap({
 
         {/* Vehicle / asset markers */}
         {markers.map((m, i) => (
-          m.lat != null && m.lng != null && (
+          m.lat != null && m.lng != null && isFinite(m.lat) && isFinite(m.lng) && (
             <Marker
               key={m.id || i}
               position={[m.lat, m.lng]}
